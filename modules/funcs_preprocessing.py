@@ -177,10 +177,18 @@ def load_dataset(base_paths, names, dataset_name, pool_size=32):
     print(f"{dataset_name} images loaded.")
     return images, masks
 
-def dilate_masks(mask):
+# Should iteration be related to tile size? Changed because we we hardcoded 512//2, w/ 512 being our previous tile size
+def _dilate_masks(mask, tile_size):
     mask = np.array(mask)
-    mask = ndimage.binary_dilation(mask, iterations=512//2, structure=np.ones((3,3)))
+    mask = ndimage.binary_dilation(mask, iterations=tile_size//2, structure=np.ones((3,3)))
     return mask
+
+def mp_dilate_masks(masks, tile_size, pool_size=32):
+    print("Dilating masks...")
+    with Pool(pool_size) as p:
+            dmasks = list(tqdm(p.starmap(_dilate_masks, [(mask, tile_size) for mask in masks]), total=len(masks)))
+    print(f"Dilated {len(dmasks)} masks.")
+    return dmasks
 
 # === Utils ===
 def execute_file(file: str):

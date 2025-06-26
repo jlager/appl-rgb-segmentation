@@ -8,10 +8,11 @@ from .funcs_preprocessing import (
     _load_image_names,
     _load_image_and_mask,
     load_dataset,
-    dilate_masks
+    mp_dilate_masks
 )
 
 from .funcs_dataloader import (
     Augmentations,
-    TileDataset_DilationSampling
+    TileDataset_DilationSampling,
+    BuildDataloader
 )
