@@ -1,3 +1,3 @@
 from .trainer import (
-    SegmentationModel
+    Trainer
 )

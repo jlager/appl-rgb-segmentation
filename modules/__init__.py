@@ -1,3 +1,5 @@
+import funcs_metrics as metrics
+
 from .funcs_preprocessing import (
     execute_file,
     process_image,

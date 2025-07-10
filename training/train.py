@@ -1,23 +1,23 @@
 import os, sys
 import pandas as pd
-import numpy as np
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+import torch
+import trainer
+import segmentation_models_pytorch as smp
 
 from multiprocessing import Pool
-from trainer import SegmentationModel
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning import seed_everything
+from torch.optim import AdamW
 from modules import (
     data_split,
     verify_disjoint,
     load_dataset,
     mp_dilate_masks,
     Augmentations,
-    BuildDataloader
+    BuildDataloader,
 )
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+print("test")
+print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 # === Data Splitting ===
 
@@ -66,7 +66,7 @@ image_ext = '.png'
 assert os.path.exists(images_base), f"Images path {images_base} does not exist."
 assert os.path.exists(masks_base), f"Masks path {masks_base} does not exist."
 
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 ACCUMULATION_STEPS = 32
 TILE_SIZES = {
     "rn_224": 224,
@@ -78,20 +78,31 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 TRAIN_TILES_PER_IMAGE = 10
 OTHER_TILES_PER_IMAGE = 100
 
+SEED = 42
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+
 # Load names for each split
 names_train = train['File Name'].tolist() 
 names_val = val['File Name'].tolist()
 names_test = test['File Name'].tolist()
 
 # Get datasets and dataloaders
-train_images, train_masks = load_dataset((images_base, masks_base), names_train[:50], "Train")
+image_count = 200
+if image_count is not None:
+    train_images, train_masks = load_dataset((images_base, masks_base), names_train[:image_count], "Train")
+else:
+    train_images, train_masks = load_dataset((images_base, masks_base), names_train, "Train")
 dmasks_train = mp_dilate_masks(train_masks, TILE_SIZES["rn_224"], pool_size=32)
 
-val_images, val_masks = load_dataset((images_base, masks_base), names_val[:25], "Validation")
+val_images, val_masks = load_dataset((images_base, masks_base), names_val[:(image_count*.08)], "Validation")
 dmasks_val = mp_dilate_masks(val_masks, TILE_SIZES["rn_224"], pool_size=32)
 
-test_images, test_masks = load_dataset((images_base, masks_base), names_test[:25], "Test")
-dmasks_test = mp_dilate_masks(test_masks, TILE_SIZES["rn_224"], pool_size=32)
+# test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
+# dmasks_test = mp_dilate_masks(test_masks, TILE_SIZES["rn_224"], pool_size=32)
 
 train_dataset, train_dataloader = BuildDataloader.build_dataloader(
     images=train_images,
@@ -117,75 +128,57 @@ val_dataset, val_dataloader = BuildDataloader.build_dataloader(
     tile_size=TILE_SIZES["rn_224"],
     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
     tiles_per_image=OTHER_TILES_PER_IMAGE,
-    mix_ratio=0.25,
+    mix_ratio=0.5,
     
+    shuffle=False,
     num_workers=32,
     pin_memory=True,
     persistent_workers=True,
 )
 
-test_dataset, test_dataloader = BuildDataloader.build_dataloader(
-    images=val_images,
-    masks=val_masks,
-    dilated_masks=dmasks_val,
-    batch_size=BATCH_SIZE,
-    tile_size=TILE_SIZES["rn_224"],
-    transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
-    tiles_per_image=OTHER_TILES_PER_IMAGE,
-    mix_ratio=0.25,
+# test_dataset, test_dataloader = BuildDataloader.build_dataloader(
+#     images=test_images,
+#     masks=test_masks,
+#     dilated_masks=dmasks_test,
+#     batch_size=BATCH_SIZE,
+#     tile_size=TILE_SIZES["rn_224"],
+#     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
+#     tiles_per_image=OTHER_TILES_PER_IMAGE,
+#     mix_ratio=0.25,
     
-    num_workers=32,
-    pin_memory=True,
-    persistent_workers=True,
-)
+#     num_workers=32,
+#     pin_memory=True,
+#     persistent_workers=True,
+# )
 
 
-# === Model Training (w/ Pytorch Lightning) ===
-
-# Seeding and paths
-seed_everything(42, workers=True, verbose=True)
-root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-timestamp = pd.Timestamp.now().strftime("%Y-%m-%d")
-
-# Create log directory. Lightning will create tensorboard logs and save model checkpoints.
-log_dir = os.path.join(root, 'logs', timestamp)
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
-    
-# Create logger
-logger = TensorBoardLogger(save_dir=log_dir, name='lightning_logs')
+# === Model Training ===    
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Initialize the model
-model = SegmentationModel(
-    arch="Unet",
-    encoder_name="resnet34",
-    encoder_weights=None,
-    in_channels=3,
-    out_classes=1,
-    max_epochs=100
+model = smp.Unet(
+    encoder_name="resnet34",       
+    encoder_weights=None,    
+    in_channels=3,                   
+    classes=2,                       
+).to(DEVICE)
+
+optimizer = AdamW(model.parameters(), lr=1e-3)
+criterion = torch.nn.CrossEntropyLoss()
+scaler = torch.amp.GradScaler('cuda')
+
+trainer = trainer.Trainer(
+    model=model, 
+    train_loader=train_dataloader, 
+    val_loader=val_dataloader,
+    optimizer=optimizer, 
+    criterion=criterion,
+    scaler=scaler,
+    device=DEVICE
 )
 
-# Set up the trainer
-trainer = pl.Trainer(
-    max_epochs=100, 
-    log_every_n_steps=1,
-    precision="bf16-mixed",
-    accumulate_grad_batches=ACCUMULATION_STEPS,
-    logger=logger,
-    callbacks=[
-        EarlyStopping(
-            monitor="valid_dataset_f1",
-            min_delta=0.005, 
-            patience=50, 
-            mode="max", 
-            verbose=True,
-            )
-        ],
-)
 
-# Begin training
-trainer.fit(
-    model,
-    train_dataloaders=train_dataloader,
-    val_dataloaders=val_dataloader,
-)
+if __name__ == '__main__':
+    trainer.fit(
+        max_epochs=1,
+    )
