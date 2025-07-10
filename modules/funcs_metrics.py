@@ -48,36 +48,27 @@ def _compute_metric(metric_fn, tp, fp, fn, tn, reduction, **metric_kwargs):
 METRIC FUNCTIONS
 """
 
-
-def _recall(tp, fp, fn, tn):
-    """Recall (TPR)"""
-    return tp / (tp + fn + 1e-8)  
-
-def _false_positive_rate(tp, fp, fn, tn):
-    """False Positive Rate (FPR)"""
-    return fp / (fp + tn + 1e-8)  
-
-def _specificity(tp, fp, fn, tn):
-    """Specificity (TNR)"""
-    return tn / (tn + fp + 1e-8)  
-
-def _false_negative_rate(tp, fp, fn, tn):
-    """False Negative Rate (FNR)"""
-    return fn / (fn + tp + 1e-8)  
-
 def _fbeta_score(tp, fp, fn, tn, beta=1):
     beta_tp = (1 + beta**2) * tp
     beta_fn = (beta**2) * fn
     score = beta_tp / (beta_tp + beta_fn + fp)
     return score
 
-def _precision(tp, fp, fn, tn):
-    """Precision"""
-    return tp / (tp + fp + 1e-8)  
+def _sensitivity(tp, fp, fn, tn):
+    """Sensitivity (True Positive Rate)"""
+    return tp / (tp + fn + 1e-8)
 
-def _accuracy(tp, fp, fn, tn):
-    """Accuracy"""
-    return (tp + tn) / (tp + fp + fn + tn + 1e-8)  
+def _specificity(tp, fp, fn, tn):
+    """Specificity (True Negative Rate)"""
+    return tn / (tn + fp + 1e-8)
+
+def _false_negative_rate(tp, fp, fn, tn):
+    return 1 - _sensitivity(tp, fp, fn, tn)
+
+
+def _false_positive_rate(tp, fp, fn, tn):
+    return 1 - _specificity(tp, fp, fn, tn)
+
 
 """
 METRICS
@@ -103,17 +94,16 @@ def fbeta_score(
         reduction=reduction,
     )
 
-# Recall (True Positive Rate)
-def recall_score(
+def sensitivity(
     tp: torch.LongTensor,
     fp: torch.LongTensor,
     fn: torch.LongTensor,
     tn: torch.LongTensor,
     reduction: Optional[str] = None,
 ) -> torch.Tensor:
-    """Recall (TPR)"""
+    """Sensitivity (TPR)"""
     return _compute_metric(
-        _recall,
+        _sensitivity,
         tp,
         fp,
         fn,
@@ -121,7 +111,6 @@ def recall_score(
         reduction=reduction,
     )
     
-# False Positive Rate
 def false_positive_rate(
     tp: torch.LongTensor,
     fp: torch.LongTensor,
@@ -139,7 +128,6 @@ def false_positive_rate(
         reduction=reduction,
     )
     
-# Specificity (True Negative Rate)
 def specificity(
     tp: torch.LongTensor,
     fp: torch.LongTensor,
@@ -157,7 +145,6 @@ def specificity(
         reduction=reduction,
     )
 
-# False Negative Rate
 def false_negative_rate(
     tp: torch.LongTensor,
     fp: torch.LongTensor,

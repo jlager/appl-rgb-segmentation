@@ -1,8 +1,10 @@
 import os, sys
 import pandas as pd
 import torch
-import trainer
 import segmentation_models_pytorch as smp
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+print("test")
+print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from multiprocessing import Pool
 from torch.optim import AdamW
@@ -14,10 +16,8 @@ from modules import (
     Augmentations,
     BuildDataloader,
 )
+from training import Trainer
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-print("test")
-print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 # === Data Splitting ===
 
@@ -98,7 +98,7 @@ else:
     train_images, train_masks = load_dataset((images_base, masks_base), names_train, "Train")
 dmasks_train = mp_dilate_masks(train_masks, TILE_SIZES["rn_224"], pool_size=32)
 
-val_images, val_masks = load_dataset((images_base, masks_base), names_val[:(image_count*.08)], "Validation")
+val_images, val_masks = load_dataset((images_base, masks_base), names_val[:25], "Validation")
 dmasks_val = mp_dilate_masks(val_masks, TILE_SIZES["rn_224"], pool_size=32)
 
 # test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
@@ -167,7 +167,7 @@ optimizer = AdamW(model.parameters(), lr=1e-3)
 criterion = torch.nn.CrossEntropyLoss()
 scaler = torch.amp.GradScaler('cuda')
 
-trainer = trainer.Trainer(
+trainer = Trainer(
     model=model, 
     train_loader=train_dataloader, 
     val_loader=val_dataloader,
@@ -177,8 +177,6 @@ trainer = trainer.Trainer(
     device=DEVICE
 )
 
-
-if __name__ == '__main__':
-    trainer.fit(
-        max_epochs=1,
-    )
+trainer.fit(
+    max_epochs=1,
+)

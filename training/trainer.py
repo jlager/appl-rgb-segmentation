@@ -1,6 +1,13 @@
 import torch
+import gc
+
 from modules import(
-    metrics
+    get_stats,
+    fbeta_score,
+    sensitivity,
+    false_positive_rate,
+    specificity,
+    false_negative_rate,
 )
 class Trainer:
     """
@@ -71,11 +78,11 @@ class Trainer:
             self.backward(loss)
         
         # Get stats for metrics. Rates used for logging/printing
-        tp, fp, fn, tn = metrics.get_stats(logits, masks, debug=False)
-        tpr = metrics.recall_score(tp, fn, tn, fn, reduction="micro")
-        fpr = metrics.false_positive_rate(fp, tn, tn, fn, reduction="micro")
-        tnr = metrics.specificity(fp, tn, tn, fn, reduction="micro")
-        fnr = metrics.false_negative_rate(fn, tp, tn, fn, reduction="micro")
+        tp, fp, fn, tn = get_stats(logits, masks, debug=False)
+        tpr = sensitivity(tp, fn, tn, fn, reduction="micro")
+        fpr = false_positive_rate(fp, tn, tn, fn, reduction="micro")
+        tnr = specificity(fp, tn, tn, fn, reduction="micro")
+        fnr = false_negative_rate(fn, tp, tn, fn, reduction="micro")
 
 
 
@@ -98,7 +105,7 @@ class Trainer:
         fn = torch.cat([out['fn'] for out in outputs])
         tn = torch.cat([out['tn'] for out in outputs])
 
-        dataset_f1 = metrics.fbeta_score(tp, fp, fn, tn, beta=1.0, reduction="micro")
+        dataset_f1 = fbeta_score(tp, fp, fn, tn, beta=1.0, reduction="micro")
 
         metrics = {
             f"{stage}_dataset_f1": dataset_f1,
@@ -137,6 +144,22 @@ class Trainer:
         
         print("")
         
+    def terminate(self):
+        """
+        Clean up resources and finalize training.
+        Called after all epochs are completed.
+        """
+        
+        
+        # Free CUDA memory
+        torch.cuda.empty_cache()
+        
+        # Deref dataloaders and collect
+        self.train_loader = None
+        self.val_loader = None
+        gc.collect()
+        print("Training completed.")
+           
     # Fit method to run training and validation for a specified number of epochs
     def fit(self, max_epochs=10):
         
@@ -144,4 +167,7 @@ class Trainer:
             print(f"Epoch {epoch + 1}/{max_epochs}")
             self.train()
             self.validate()
-        
+            
+        print("Training finished. Shutting down")
+        self.terminate()  # Clean up resources
+
