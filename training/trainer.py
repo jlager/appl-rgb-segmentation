@@ -157,7 +157,7 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Training", )
 
         for batch in pbar:
-            output = self.shared_step(batch, stage="val")
+            output = self.shared_step(batch, stage="train")
             current_loss = output['loss'].mean()
             current_f1 = output['f1'].mean()
             outputs.append(output)
