@@ -3,7 +3,6 @@ import pandas as pd
 import torch
 import segmentation_models_pytorch as smp
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-print("test")
 print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from multiprocessing import Pool
