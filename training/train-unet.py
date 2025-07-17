@@ -202,7 +202,7 @@ trainer = Trainer(
     criterion=criterion,
     scaler=scaler,
     device=DEVICE,
-    auto_cast_dtype=AUTOCAST_DTYPE,
+    autocast_dtype=AUTOCAST_DTYPE,
     patience=None,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
 )
