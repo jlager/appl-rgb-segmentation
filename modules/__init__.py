@@ -25,3 +25,8 @@ from .funcs_metrics import (
     specificity,
     false_negative_rate
 )
+
+from .funcs_losses import (
+    DiceLoss,
+    CombinedLoss
+)

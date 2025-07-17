@@ -37,9 +37,13 @@ def _compute_metric(metric_fn, tp, fp, fn, tn, reduction, **metric_kwargs):
         tn = tn.sum()
         score = metric_fn(tp, fp, fn, tn, **metric_kwargs)
 
+    # per sample/batch
+    elif reduction is None:
+        score = metric_fn(tp, fp, fn, tn, **metric_kwargs)
+        
     else:
         raise ValueError(
-            f"reduction` should be in [micro]. got {reduction}"
+            f"reduction` should be in [micro, None]. got {reduction}"
         )
 
     return score
