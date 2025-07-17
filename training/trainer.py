@@ -89,7 +89,6 @@ class Trainer:
         assert images.ndim == 4, "Images should be a 4D tensor (batch_size, channels, height, width)"
         
         masks = batch[1]
-        masks = masks
         assert masks.ndim == 3, "Masks should be a 3D tensor (batch_size, height, width)"
         assert masks.max() <= 1 and masks.min() >= 0, "Masks should be binary (0 or 1)"
         
