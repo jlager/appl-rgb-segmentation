@@ -12,41 +12,38 @@ from torch.optim import AdamW
 from modules import (
     data_split,
     verify_disjoint,
-    load_dataset,
+    load_memmap_paths,
     mp_dilate_masks,
     Augmentations,
     BuildDataloader,
     CombinedLoss,
 )
 from training import Trainer
-
+                            
 # ===============
 # === OPTIONS ===
 # ===============
 
-MD_DIR = os.path.join('data', 'splits', '')
-IMAGE_DIR = os.path.join('data', 'images', '')
-MASK_DIR = os.path.join('data', 'masks', '')
-VAR_DIR = os.path.join('data', 'results')
+PROJECT_ = '/mnt/DGX01/Personal/milliganj/codebase/projects/appl-rgb-segmentation'
+METADATA_ = os.path.join(os.getcwd(), 'data', 'splits', '')
+DATA_ = os.path.join(os.getcwd(), 'data')
+IMAGES_ = os.path.join(DATA_, 'images')
+MASKS_ = os.path.join(DATA_, 'masks')
 IMAGE_EXT = 'png'
-# CHECKPOINT_PATH = os.path.join('data', 'checkpoints', 'appl-resnet34.pt')
-# LOG_PATH = os.path.join('data', 'logs', 'appl-resnet34.csv')
 
 TILE_SIZE = 224
 TRAIN_TILES_PER_IMAGE = 10
 VAL_TILES_PER_IMAGE = 100
-TEST_TILES_PER_IMAGE = 100
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
-
-EPOCHS = 10
 BATCH_SIZE = 112
-MICRO_BATCH_SIZE = 7
+MICRO_BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = BATCH_SIZE // MICRO_BATCH_SIZE
-LR = 1e-3
+
+EPOCHS = 1
+LR = 1e-4
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 32
-DEVICE = torch.device('cuda:0')
 
 MODEL = 'resnet34'
 WEIGHTS = None
@@ -59,15 +56,13 @@ random.seed(SEED)
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(SEED)
-# torch.backends.cudnn.benchmark = False
-# torch.backends.cudnn.deterministic = True
     
 # ======================    
 # === DATA SPLITTING ===
 # ======================    
 
 # Load metadata
-md_path = os.path.join(MD_DIR, 'metadata.csv')
+md_path = os.path.join(METADATA_, 'metadata.csv')
 assert os.path.exists(md_path), f"Metadata file not found at {md_path}"
 metadata = pd.read_csv(md_path)
 metadata['Group'] = metadata['Species'].astype(str) + '_' + metadata['Plant ID'].astype(str)
@@ -103,38 +98,25 @@ verify_disjoint(val, test, 'Group', verbose=True)
 
 # === Data Loading ===
 
-# Options
-data = 'data/'
-images_base = os.path.join(data, 'images/')
-masks_base = os.path.join(data, 'masks/')
-image_ext = '.png'
-assert os.path.exists(images_base), f"Images path {images_base} does not exist."
-assert os.path.exists(masks_base), f"Masks path {masks_base} does not exist."
-
-
 # Load names for each split
 names_train = train['File Name'].tolist() 
 names_val = val['File Name'].tolist()
 names_test = test['File Name'].tolist()
 
-# Get datasets and dataloaders
-image_count = None
-if image_count is not None:
-    train_images, train_masks = load_dataset((images_base, masks_base), names_train[:image_count], "Train")
-else:
-    train_images, train_masks = load_dataset((images_base, masks_base), names_train, "Train")
-dmasks_train = mp_dilate_masks(train_masks, TILE_SIZE, pool_size=32)
+# Get memory map paths for images and masks
+train_images, train_masks = load_memmap_paths((IMAGES_, MASKS_), names_train)
+print(f"Found {len(train_images)} training images and {len(train_masks)} training masks.")
 
-val_images, val_masks = load_dataset((images_base, masks_base), names_val, "Validation")
-dmasks_val = mp_dilate_masks(val_masks, TILE_SIZE, pool_size=32)
+val_images, val_masks = load_memmap_paths((IMAGES_, MASKS_), names_val)
+print(f"Found {len(val_images)} validation images and {len(val_masks)} validation masks.\n")
 
 # test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
 # dmasks_test = mp_dilate_masks(test_masks, TILE_SIZE, pool_size=32)
 
+# Build datasets and dataloaders
 train_dataset, train_dataloader = BuildDataloader.build_dataloader(
     images=train_images,
     masks=train_masks,
-    dilated_masks=dmasks_train,
     batch_size=BATCH_SIZE,
     tile_size=TILE_SIZE, 
     transform=Augmentations.get_train_transform(IMAGENET_MEAN, IMAGENET_STD),
@@ -150,7 +132,6 @@ train_dataset, train_dataloader = BuildDataloader.build_dataloader(
 val_dataset, val_dataloader = BuildDataloader.build_dataloader(
     images=val_images,
     masks=val_masks,
-    dilated_masks=dmasks_val,
     batch_size=BATCH_SIZE,
     tile_size=TILE_SIZE,
     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
@@ -180,7 +161,6 @@ val_dataset, val_dataloader = BuildDataloader.build_dataloader(
 
 
 # === Model Training ===    
-DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Initialize the model
 model = smp.Unet(

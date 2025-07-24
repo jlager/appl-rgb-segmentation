@@ -1,14 +1,21 @@
 import numpy as np
 import random
 import albumentations as A
+
+from multiprocessing import Pool
 from torch.utils.data import Dataset, DataLoader
 from albumentations.pytorch import ToTensorV2
+from typing import List, Tuple, Optional, Union
+from scipy import ndimage
+from modules import (
+    load_memmap
+)
 
 
 # Augmentations
 class Augmentations:
 
-    def get_train_transform(IMAGENET_MEAN, IMAGENET_STD):
+    def get_train_transform(IMAGENET_MEAN: List[float], IMAGENET_STD: List[float]):
         return A.Compose([
             A.HorizontalFlip(p=0.5),
             A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=0, p=0.5, border_mode=1),
@@ -16,7 +23,7 @@ class Augmentations:
             ToTensorV2(),
         ])
 
-    def get_valid_transform(IMAGENET_MEAN, IMAGENET_STD):
+    def get_valid_transform(IMAGENET_MEAN: List[float], IMAGENET_STD: List[float]):
         return A.Compose([
             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ToTensorV2(),
@@ -24,28 +31,37 @@ class Augmentations:
 
 class TileDataset_DilationSampling(Dataset):
 
-    def __init__(self, images, masks, dilated_masks, tile_size, transform, 
-                 tiles_per_image=100, mix_ratio=0.7):
+    def __init__(
+        self, 
+        images: List[str],  # Json Paths
+        masks: List[str],   # Json Paths
+        tile_size: int = 244, # Based on ViT spec
+        transform: A.Compose = None, 
+        tiles_per_image: int = 100, 
+        mix_ratio: float = 0.7
+        ):
         
         self.images = images
         self.masks = masks
-        self.dilated_masks = dilated_masks
         self.tile_size = tile_size
         self.transform = transform
         self.tiles_per_image = tiles_per_image
-        self.bound = tile_size // 2
         self.mix_ratio = mix_ratio
+        
+        self.bound = tile_size // 2
 
     def __len__(self):
         return self.tiles_per_image * len(self.images)
 
     def __getitem__(self, idx):
+        
         # Cycle through images evenly
         img_idx = idx % len(self.images)
-        image = self.images[img_idx]
-        mask = self.masks[img_idx]
-        dilated_mask = self.dilated_masks[img_idx]
+        image = load_memmap(self.images[img_idx])
+        mask = load_memmap(self.masks[img_idx])
+        dilated_mask = self._dilate(mask)
 
+        # Pixel Sampling
         if random.random() < self.mix_ratio:
             # Foreground sampling
             row, col = self._get_fg_px(dilated_mask, self.tile_size)
@@ -53,23 +69,32 @@ class TileDataset_DilationSampling(Dataset):
             # Background sampling
             row, col = self._get_bg_px(dilated_mask, self.tile_size)
         
-        # Compute crop coordinates. If the tile would crop beyond the
+        # Compute crop coordinates. 
         left = col - self.bound
         upper = row - self.bound
         right = left + self.tile_size
         lower = upper + self.tile_size
 
         # Crop and transform
-        tile_image = np.asarray(image.crop((left, upper, right, lower)), copy=True)
-        tile_mask  = np.asarray(mask.crop((left, upper, right, lower)), copy=True)
+        tile_image = image[upper:lower, left:right, :]
+        tile_mask  = mask[upper:lower, left:right]
 
         # Augment tile and normalize to binary
-        augmented = self.transform(image=tile_image, mask=tile_mask)
+        if self.transform is None:
+            raise ValueError("Transform must be provided for DataLoader.")
+            
+        augmented = self.transform(image=tile_image, mask=tile_mask.astype('uint8'))
         image_tensor = augmented['image']
         mask_tensor  = (augmented['mask'] > 0).long() # [0 - 255] -> [0 - 1]
 
+
         # Change back to only return tensors after testing
         return image_tensor, mask_tensor
+    
+    
+    def _dilate(self, mask):
+        mask = ndimage.binary_dilation(mask, iterations=self.bound, structure=np.ones((3,3)))
+        return mask   
     
     def _get_fg_px(self, mask: np.ndarray, tile_size: int):
         
@@ -96,12 +121,11 @@ class TileDataset_DilationSampling(Dataset):
 class BuildDataloader:
     
     @staticmethod
-    def build_dataloader(images, masks, dilated_masks, batch_size, tile_size, tiles_per_image, transform, mix_ratio, **kwargs):
+    def build_dataloader(images, masks, batch_size, tile_size, tiles_per_image, transform, mix_ratio, **kwargs):
         
         dataset = TileDataset_DilationSampling(
             images=images,
             masks=masks,
-            dilated_masks=dilated_masks,
             tile_size=tile_size,
             transform=transform,
             tiles_per_image=tiles_per_image,
@@ -115,3 +139,4 @@ class BuildDataloader:
         )
 
         return dataset, dataloader
+
