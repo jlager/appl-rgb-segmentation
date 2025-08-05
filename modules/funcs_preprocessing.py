@@ -8,148 +8,95 @@ import numpy as np
 import pandas as pd
 
 from PIL import Image
-from skimage import measure
-from PIL import ImageDraw
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from sklearn.model_selection import GroupShuffleSplit
 from multiprocessing import Pool
 from scipy import ndimage
 from tqdm import tqdm
 
 
-
-
 # === Image & Mask Processing ===
-def process_image(filename:str, dest_folder:str):
+def image_to_memmap(image_path: str, save_path: str, dtype: str) -> None:
     """
-    Categorizes an APPL RGB image by 'Modality'-'Species' and saves it to the specified destination folder.
-
-    Args:
-        filename (str): The path to the mask image file.
-        processed_dir_root (str): The directory root for where the processed mask will be saved.
+    Convert an RGB image to a numpy memmap file.
     """
+    # book keeping
+    name = os.path.basename(image_path)
+    sub_dir = os.path.dirname(image_path).split(os.sep)[-1]
+    save_dir = os.path.join(save_path, sub_dir)
+    save_name = os.path.join(save_dir, name.replace(image_path.split('.')[-1], 'memmap'))
+
+    # skip if already exists
+    if os.path.exists(save_name):
+        return
+
+    # load image
+    image = np.array(Image.open(image_path).convert('RGB'))
+            
+    # create save directories
+    os.makedirs(save_path, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+
+    # save image as memmap
+    memmap = np.memmap(save_name, dtype=dtype, mode='w+', shape=image.shape)
+    memmap[:] = image[:]
+    del memmap
     
-    img = Image.open(filename)
-    img.save(f'{dest_folder}/{os.path.basename(filename)}')
-
-
-def process_mask(filename:str, dest_folder:str):
+def mask_to_memmap(mask_path: str, save_path: str, dtype: str) -> None:
     """
-    Processes a raw CVAT mask image by thresholding and saving the binary mask. Binary mask is categorized by 'Modality'-'Species' within processed_dir_root
-
-    Args:
-        filename (str): The path to the mask image file.
-        processed_dir_root (str): The directory root for where the processed mask will be saved.
+    Convert a mask image to a numpy memmap file.
     """
- 
-    # # don't reprocess old files
-    # if os.path.exists(f'{save_path}{os.path.basename(filename)}'):
-    #     return
-    
-    # 1. get modality-species from filename
-    # 2. load mask as an RGB image
-    # 3. threshold the image, get list of pixels w/ values > 128     
-    # 4. convert boolean array to binary (0 or 1) >> gives binary mask
-    # 5. save the processed mask
-    
-    img = Image.open(filename).convert('RGB')
-    img = np.array(img)[:, :, 0] > 128
-    img = Image.fromarray(img.astype(np.uint8) * 255)
-    img.save(f'{dest_folder}/{os.path.basename(filename)}')
-    
+    # book keeping
+    name = os.path.basename(mask_path)
+    sub_dir = os.path.dirname(mask_path).split(os.sep)[-2]
+    save_dir = os.path.join(save_path, sub_dir)
+    save_name = os.path.join(save_dir, name.replace(mask_path.split('.')[-1], 'memmap'))
 
+    # skip if already exists
+    if os.path.exists(save_name):
+        return
 
-def overlay(image_dir_root:str, mask_dir_root:str):
-    """
-    Overlays a binary mask on its original image.
-    """
-    
-    # Some checks on arguments
-    assert os.path.exists(image_dir_root), f"Image directory {image_dir_root} does not exist."
-    assert os.path.exists(mask_dir_root), f"Mask directory {mask_dir_root} does not exist."
-    
-    categories = glob.glob(mask_dir_root + '*/')
-    assert len(categories) > 0, f"No categories found in {mask_dir_root}. Check the directory structure."
-    print(f"Found {len(categories)} categories in {mask_dir_root}")
-    for category in categories:
-        print(category)
-    
-    # Get all mask paths
-    masks = [x for x in glob.glob(mask_dir_root + '**/*.png')]
-    
-    # Load random image and mask
-    index = np.random.randint(len(masks))
-    category = f"{os.path.basename(os.path.dirname(masks[index]))}/"
-    name = os.path.basename(masks[index])
-    image = Image.open(f'{image_dir_root}{category}{name}')
-    mask = Image.open(f'{mask_dir_root}{category}{name}')
-    
-    # Get contours from mask
-    contours = measure.find_contours(np.array(mask), level=0.5)
-    
-    # Draw contour on image (reference below)
-    for contour in contours:
-        contour = np.flip(contour, axis=1)
-        draw = ImageDraw.Draw(image)
-        draw.line([tuple(c) for c in contour.tolist()], fill='red', width=3)
-        
-    return image
+    # load mask
+    mask = np.array(Image.open(mask_path).convert('RGB'))
+    mask = mask[:, :, 0] > 128 # convert red channel to boolean mask
 
+    # create save directories
+    os.makedirs(save_path, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+
+    # save image as memmap
+    memmap = np.memmap(save_name, dtype=dtype, mode='w+', shape=mask.shape)
+    memmap[:] = mask[:]
+    del memmap
+    
 # === Splitting & Data Loading ===
 
-
-# sklearn gss to do our splits
-def data_split(metadata: pd.DataFrame, n_splits, n_samples, group, random_state):
+def split(df: pd.DataFrame, max_reshuffle_iters: int=1000, samples_per_split: int=250, random_state: int=42) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Split metadata into train and target sets using GroupShuffleSplit.
+    Split DataFrame into train and target sets.
     """
-    
-    # options
-    count = 0
-    gss = GroupShuffleSplit(n_splits=n_splits, test_size=n_samples/len(metadata), random_state=random_state)
+    # build train/test splitter
+    splitter = GroupShuffleSplit(
+        n_splits=max_reshuffle_iters,
+        test_size=samples_per_split / len(df),
+        random_state=random_state
+    )
 
-    # storage for indices
-    target_idx = []
-    
-    # Sample indices until we find a split with exactly n_samples in the target set
-    for train_idx, target_idx in gss.split(metadata, groups=metadata[group]):
-
-        if len(metadata.iloc[target_idx])==n_samples:
+    # reshuffle splits until we find samples_per_split in the test set
+    for train_idx, target_idx in splitter.split(df, groups=df['Group']):
+        if len(df.iloc[target_idx]) == samples_per_split:
             break
-        count += 1
-    
-    # If we reach the maximum number of splits without finding a valid target set, raise an error
-    if len(metadata.iloc[target_idx]) != n_samples:
-        raise ValueError(f"Could not find a split with exactly {n_samples} samples within {n_splits} iterations.")
-    
-    # Return the train and target sets
-    target = metadata.iloc[target_idx].reset_index(drop=True)
-    train = metadata.iloc[train_idx].reset_index(drop=True)
-    
-    return train, target
 
-def verify_disjoint(df1, df2, column, verbose=False):
-    """
-    Verify that two DataFrames have disjoint sets of specified column values.
-    """
+    # raise an error if the test set does not have samples_per_split samples
+    if len(df.iloc[target_idx]) != samples_per_split:
+        raise ValueError('Failed to find exact split')
+
+    # split the metadata into train and test sets
+    train_df = df.iloc[train_idx].reset_index(drop=True)
+    target_df = df.iloc[target_idx].reset_index(drop=True)
+
+    return train_df, target_df
     
-    similar = []
-
-    column1 = set(df1[column])
-    column2 = set(df2[column])
-
-    if column1.isdisjoint(column2):
-        return True
-    else:
-        similar = column1.intersection(column2)
-
-    if verbose:
-        print(f"Overlapping groups: {len(similar)}")
-        for group in similar:
-            print(f"- {group}")
-            
-    assert len(similar) == 0, f"DataFrames are not disjoint on column '{column}'. See above for overlapping groups."
-            
 def _load_image_names(
     image_dir: str,
     mask_dir: str,
@@ -177,7 +124,6 @@ def load_dataset(base_paths, names, dataset_name, pool_size=32):
     print(f"{dataset_name} images loaded.")
     return images, masks
 
-# Should iteration be related to tile size? Changed because we we hardcoded 512//2, w/ 512 being our previous tile size
 def _dilate_masks(mask, tile_size):
     mask = np.array(mask)
     mask = ndimage.binary_dilation(mask, iterations=tile_size//2, structure=np.ones((3,3)))

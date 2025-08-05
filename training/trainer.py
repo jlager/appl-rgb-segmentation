@@ -183,7 +183,8 @@ class Trainer:
                 current_f1 = output['f1'].mean()
                 outputs.append(output)
 
-                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}\n")
+
+                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}")
 
         # Return metrics
         return self.shared_epoch_end(outputs, stage="val", verbose=verbose)

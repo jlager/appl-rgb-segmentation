@@ -10,7 +10,7 @@ print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from multiprocessing import Pool
 from torch.optim import AdamW
 from modules import (
-    data_split,
+    split,
     verify_disjoint,
     load_memmap_paths,
     mp_dilate_masks,
@@ -48,7 +48,7 @@ NUM_WORKERS = 32
 MODEL = 'resnet34'
 WEIGHTS = None
 NUM_CLASSES = 2
-AUTOCAST_DTYPE = torch.float16
+AUTOCAST_DTYPE = "float16"
 
 DEVICE = torch.device("cuda:0")
 SEED = 42
@@ -61,47 +61,24 @@ if torch.cuda.is_available():
 # === DATA SPLITTING ===
 # ======================    
 
-# Load metadata
-md_path = os.path.join(METADATA_, 'metadata.csv')
-assert os.path.exists(md_path), f"Metadata file not found at {md_path}"
-metadata = pd.read_csv(md_path)
-metadata['Group'] = metadata['Species'].astype(str) + '_' + metadata['Plant ID'].astype(str)
+# Load metadata splits
+md_train =  os.path.join(MD_DIR, 'train.csv')
+md_val =    os.path.join(MD_DIR, 'val.csv')
+md_test =   os.path.join(MD_DIR, 'test.csv')
+assert os.path.exists(md_train), f"Metadata file not found at {md_train}"
+assert os.path.exists(md_val), f"Metadata file not found at {md_val}"
+assert os.path.exists(md_test), f"Metadata file not found at {md_test}"
 
-# Set split options
-n_splits = 1000
-n_samples = 250
-group = 'Group'
-random_state = 42
-
-# Splitting into val/test with GroupShuffleSplit
-train, test = data_split(
-    metadata,
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
-
-train, val = data_split(
-    train, 
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
-
-# Verify disjoint on the 'Group' column
-verify_disjoint(train, test, 'Group', verbose=True)
-verify_disjoint(train, val, 'Group', verbose=True)
-verify_disjoint(val, test, 'Group', verbose=True)
-
+md_train = pd.read_csv(md_train)
+md_val = pd.read_csv(md_val)
+md_test = pd.read_csv(md_test)
 
 # === Data Loading ===
 
 # Load names for each split
-names_train = train['File Name'].tolist() 
-names_val = val['File Name'].tolist()
-names_test = test['File Name'].tolist()
+names_train = md_train['File Name'].tolist() 
+names_val = md_val['File Name'].tolist()
+names_test = md_test['File Name'].tolist()
 
 # Get memory map paths for images and masks
 train_images, train_masks = load_memmap_paths((IMAGES_, MASKS_), names_train)

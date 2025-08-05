@@ -1,12 +1,9 @@
 from .funcs_preprocessing import (
     execute_file,
-    process_image,
-    process_mask,
-    build_memmap,
-    load_memmap,
-    data_split,
-    verify_disjoint,
-    load_memmap_paths,
+    image_to_memmap,
+    mask_to_memmap,
+    split,
+    load_dataset,
     mp_dilate_masks
 )
 
