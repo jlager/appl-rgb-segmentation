@@ -89,7 +89,6 @@ class Trainer:
         assert images.ndim == 4, "Images should be a 4D tensor (batch_size, channels, height, width)"
         
         masks = batch[1]
-        masks = masks
         assert masks.ndim == 3, "Masks should be a 3D tensor (batch_size, height, width)"
         assert masks.max() <= 1 and masks.min() >= 0, "Masks should be binary (0 or 1)"
         
@@ -157,7 +156,7 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Training", )
 
         for batch in pbar:
-            output = self.shared_step(batch, stage="val")
+            output = self.shared_step(batch, stage="train")
             current_loss = output['loss'].mean()
             current_f1 = output['f1'].mean()
             outputs.append(output)
@@ -182,7 +181,7 @@ class Trainer:
                 outputs.append(output)
 
 
-                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}\n")
+                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}")
 
         # Return metrics
         return self.shared_epoch_end(outputs, stage="val", verbose=verbose)
