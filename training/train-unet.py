@@ -1,60 +1,82 @@
 import os, sys
 import pandas as pd
 import torch
+import random
 import segmentation_models_pytorch as smp
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-print("test")
 print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from multiprocessing import Pool
 from torch.optim import AdamW
 from modules import (
-    data_split,
+    split,
     verify_disjoint,
     load_dataset,
     mp_dilate_masks,
     Augmentations,
     BuildDataloader,
+    CombinedLoss,
 )
 from training import Trainer
 
+# ===============
+# === OPTIONS ===
+# ===============
 
-# === Data Splitting ===
+MD_DIR = os.path.join('data', 'splits', '')
+IMAGE_DIR = os.path.join('data', 'images', '')
+MASK_DIR = os.path.join('data', 'masks', '')
+VAR_DIR = os.path.join('data', 'results')
+IMAGE_EXT = 'png'
+# CHECKPOINT_PATH = os.path.join('data', 'checkpoints', 'appl-resnet34.pt')
+# LOG_PATH = os.path.join('data', 'logs', 'appl-resnet34.csv')
 
-# Load metadata
-md_path = 'data/splits/metadata.csv'
-assert os.path.exists(md_path), f"Metadata file not found at {md_path}"
-metadata = pd.read_csv(md_path)
-metadata['Group'] = metadata['Species'].astype(str) + '_' + metadata['Plant ID'].astype(str)
+TILE_SIZE = 224
+TRAIN_TILES_PER_IMAGE = 10
+VAL_TILES_PER_IMAGE = 100
+TEST_TILES_PER_IMAGE = 100
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
 
-# Set split options
-n_splits = 1000
-n_samples = 250
-group = 'Group'
-random_state = 42
+EPOCHS = 10
+BATCH_SIZE = 112
+MICRO_BATCH_SIZE = 7
+GRADIENT_ACCUMULATION_STEPS = BATCH_SIZE // MICRO_BATCH_SIZE
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+NUM_WORKERS = 32
+DEVICE = torch.device('cuda:0')
 
-# Splitting into val/test with GroupShuffleSplit
-train, test = data_split(
-    metadata,
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
+MODEL = 'resnet34'
+WEIGHTS = None
+NUM_CLASSES = 2
+AUTOCAST_DTYPE = "float16"
 
-train, val = data_split(
-    train, 
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
+DEVICE = torch.device("cuda:0")
+SEED = 42
+random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(SEED)
+# torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+    
+# ======================    
+# === DATA SPLITTING ===
+# ======================    
 
-# Verify disjoint on the 'Group' column
-verify_disjoint(train, test, 'Group', verbose=True)
-verify_disjoint(train, val, 'Group', verbose=True)
-verify_disjoint(val, test, 'Group', verbose=True)
+# Load metadata splits
+md_train =  os.path.join(MD_DIR, 'train.csv')
+md_val =    os.path.join(MD_DIR, 'val.csv')
+md_test =   os.path.join(MD_DIR, 'test.csv')
+assert os.path.exists(md_train), f"Metadata file not found at {md_train}"
+assert os.path.exists(md_val), f"Metadata file not found at {md_val}"
+assert os.path.exists(md_test), f"Metadata file not found at {md_test}"
 
+md_train = pd.read_csv(md_train)
+md_val = pd.read_csv(md_val)
+md_test = pd.read_csv(md_test)
 
 # === Data Loading ===
 
@@ -66,50 +88,32 @@ image_ext = '.png'
 assert os.path.exists(images_base), f"Images path {images_base} does not exist."
 assert os.path.exists(masks_base), f"Masks path {masks_base} does not exist."
 
-BATCH_SIZE = 256
-ACCUMULATION_STEPS = 32
-TILE_SIZES = {
-    "rn_224": 224,
-    "rn_448": 448,
-}
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
-
-TRAIN_TILES_PER_IMAGE = 10
-OTHER_TILES_PER_IMAGE = 100
-
-SEED = 42
-torch.manual_seed(SEED)
-torch.cuda.manual_seed(SEED)
-
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
 
 # Load names for each split
-names_train = train['File Name'].tolist() 
-names_val = val['File Name'].tolist()
-names_test = test['File Name'].tolist()
+names_train = md_train['File Name'].tolist() 
+names_val = md_val['File Name'].tolist()
+names_test = md_test['File Name'].tolist()
 
 # Get datasets and dataloaders
-image_count = 200
+image_count = None
 if image_count is not None:
     train_images, train_masks = load_dataset((images_base, masks_base), names_train[:image_count], "Train")
 else:
     train_images, train_masks = load_dataset((images_base, masks_base), names_train, "Train")
-dmasks_train = mp_dilate_masks(train_masks, TILE_SIZES["rn_224"], pool_size=32)
+dmasks_train = mp_dilate_masks(train_masks, TILE_SIZE, pool_size=32)
 
-val_images, val_masks = load_dataset((images_base, masks_base), names_val[:25], "Validation")
-dmasks_val = mp_dilate_masks(val_masks, TILE_SIZES["rn_224"], pool_size=32)
+val_images, val_masks = load_dataset((images_base, masks_base), names_val, "Validation")
+dmasks_val = mp_dilate_masks(val_masks, TILE_SIZE, pool_size=32)
 
 # test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
-# dmasks_test = mp_dilate_masks(test_masks, TILE_SIZES["rn_224"], pool_size=32)
+# dmasks_test = mp_dilate_masks(test_masks, TILE_SIZE, pool_size=32)
 
 train_dataset, train_dataloader = BuildDataloader.build_dataloader(
     images=train_images,
     masks=train_masks,
     dilated_masks=dmasks_train,
     batch_size=BATCH_SIZE,
-    tile_size=TILE_SIZES["rn_224"], 
+    tile_size=TILE_SIZE, 
     transform=Augmentations.get_train_transform(IMAGENET_MEAN, IMAGENET_STD),
     tiles_per_image=TRAIN_TILES_PER_IMAGE,
     mix_ratio=0.5,
@@ -125,9 +129,9 @@ val_dataset, val_dataloader = BuildDataloader.build_dataloader(
     masks=val_masks,
     dilated_masks=dmasks_val,
     batch_size=BATCH_SIZE,
-    tile_size=TILE_SIZES["rn_224"],
+    tile_size=TILE_SIZE,
     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
-    tiles_per_image=OTHER_TILES_PER_IMAGE,
+    tiles_per_image=VAL_TILES_PER_IMAGE,
     mix_ratio=0.5,
     
     shuffle=False,
@@ -141,9 +145,9 @@ val_dataset, val_dataloader = BuildDataloader.build_dataloader(
 #     masks=test_masks,
 #     dilated_masks=dmasks_test,
 #     batch_size=BATCH_SIZE,
-#     tile_size=TILE_SIZES["rn_224"],
+#     tile_size=TILE_SIZE,
 #     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
-#     tiles_per_image=OTHER_TILES_PER_IMAGE,
+#     tiles_per_image=TEST_TILES_PER_IMAGE,
 #     mix_ratio=0.25,
     
 #     num_workers=32,
@@ -163,8 +167,8 @@ model = smp.Unet(
     classes=2,                       
 ).to(DEVICE)
 
-optimizer = AdamW(model.parameters(), lr=1e-3)
-criterion = torch.nn.CrossEntropyLoss()
+optimizer = AdamW(model.parameters(), lr=LR)
+criterion = CombinedLoss(weight_ce=0.5, weight_dice=0.5)
 scaler = torch.amp.GradScaler('cuda')
 
 trainer = Trainer(
@@ -174,9 +178,13 @@ trainer = Trainer(
     optimizer=optimizer, 
     criterion=criterion,
     scaler=scaler,
-    device=DEVICE
+    device=DEVICE,
+    autocast_dtype=AUTOCAST_DTYPE,
+    patience=None,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
 )
 
 trainer.fit(
-    max_epochs=1,
+    max_epochs=EPOCHS,
+    verbose=False
 )

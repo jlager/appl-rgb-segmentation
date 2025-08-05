@@ -1,8 +1,9 @@
 import numpy as np
 import random
-from torch.utils.data import Dataset
 import albumentations as A
+from torch.utils.data import Dataset, DataLoader
 from albumentations.pytorch import ToTensorV2
+
 
 # Augmentations
 class Augmentations:
@@ -90,3 +91,27 @@ class TileDataset_DilationSampling(Dataset):
         b_coords = np.unravel_index(sampled_flat, [mask.shape[0] - tile_size, mask.shape[1] - tile_size])
         b_coords = np.stack(b_coords, axis=1) + tile_size//2
         return b_coords[0][0], b_coords[0][1]
+
+
+class BuildDataloader:
+    
+    @staticmethod
+    def build_dataloader(images, masks, dilated_masks, batch_size, tile_size, tiles_per_image, transform, mix_ratio, **kwargs):
+        
+        dataset = TileDataset_DilationSampling(
+            images=images,
+            masks=masks,
+            dilated_masks=dilated_masks,
+            tile_size=tile_size,
+            transform=transform,
+            tiles_per_image=tiles_per_image,
+            mix_ratio=mix_ratio,
+        )
+        
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
+        return dataset, dataloader
