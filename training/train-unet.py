@@ -10,10 +10,7 @@ print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from multiprocessing import Pool
 from torch.optim import AdamW
 from modules import (
-    split,
-    verify_disjoint,
     load_memmap_paths,
-    mp_dilate_masks,
     Augmentations,
     BuildDataloader,
     CombinedLoss,
@@ -25,7 +22,7 @@ from training import Trainer
 # ===============
 
 PROJECT_ = '/mnt/DGX01/Personal/milliganj/codebase/projects/appl-rgb-segmentation'
-METADATA_ = os.path.join(os.getcwd(), 'data', 'splits', '')
+SPLITS_ = os.path.join(os.getcwd(), 'data', 'metadata')
 DATA_ = os.path.join(os.getcwd(), 'data')
 IMAGES_ = os.path.join(DATA_, 'images')
 MASKS_ = os.path.join(DATA_, 'masks')
@@ -58,22 +55,21 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(SEED)
     
 # ======================    
-# === DATA SPLITTING ===
+# === DATA LOADING ===
 # ======================    
 
 # Load metadata splits
-md_train =  os.path.join(MD_DIR, 'train.csv')
-md_val =    os.path.join(MD_DIR, 'val.csv')
-md_test =   os.path.join(MD_DIR, 'test.csv')
+md_train =  os.path.join(SPLITS_, 'train.csv')
+md_val =    os.path.join(SPLITS_, 'val.csv')
+md_test =   os.path.join(SPLITS_, 'test.csv')
 assert os.path.exists(md_train), f"Metadata file not found at {md_train}"
 assert os.path.exists(md_val), f"Metadata file not found at {md_val}"
 assert os.path.exists(md_test), f"Metadata file not found at {md_test}"
 
+# Dataframes for each split
 md_train = pd.read_csv(md_train)
 md_val = pd.read_csv(md_val)
 md_test = pd.read_csv(md_test)
-
-# === Data Loading ===
 
 # Load names for each split
 names_train = md_train['File Name'].tolist() 
@@ -88,7 +84,6 @@ val_images, val_masks = load_memmap_paths((IMAGES_, MASKS_), names_val)
 print(f"Found {len(val_images)} validation images and {len(val_masks)} validation masks.\n")
 
 # test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
-# dmasks_test = mp_dilate_masks(test_masks, TILE_SIZE, pool_size=32)
 
 # Build datasets and dataloaders
 train_dataset, train_dataloader = BuildDataloader.build_dataloader(

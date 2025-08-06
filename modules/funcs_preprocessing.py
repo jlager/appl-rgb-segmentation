@@ -95,34 +95,53 @@ def split(df: pd.DataFrame, max_reshuffle_iters: int=1000, samples_per_split: in
     train_df = df.iloc[train_idx].reset_index(drop=True)
     target_df = df.iloc[target_idx].reset_index(drop=True)
 
-    return train_df, target_df
-    
-def _load_image_names(
-    image_dir: str,
-    mask_dir: str,
+    return train_df, target_df    
+
+def load_memmap_paths(
+    base_paths: Tuple[str, str],
     names: List[str],
     ) -> Tuple[List[str], List[str]]:
-
-    mask_paths = [glob.glob(mask_dir + f'**/{name}')[0] for name in names]
-    image_paths = [glob.glob(image_dir + f'**/{name}')[0] for name in names]
     
+    # Unpack base paths for images and masks. Check for existence
+    image_dir, mask_dir = base_paths
+    assert os.path.exists(image_dir), f"Image directory not found: {image_dir}"
+    assert os.path.exists(mask_dir), f"Mask directory not found: {mask_dir}"
+    
+    # Replace file extensions and find paths
+    names = [name.replace('.png', '.memmap') for name in names]
+    image_paths = [glob.glob(image_dir + f'**/*/{name}', recursive=True)[0] for name in names]
+    mask_paths = [glob.glob(mask_dir + f'**/*/{name}', recursive=True)[0] for name in names]
     return image_paths, mask_paths
 
-def _load_image_and_mask(paths):
-    img_path, mask_path = paths
-    image = Image.open(img_path).convert('RGB')
-    mask = Image.open(mask_path).convert('L')
-    return image, mask
+def load_memmap(path):
+    """
+    Load a memory-mapped file from the given path.
+    Highly dependent on path structure.
+    Args:
+        path (str): The path to the memory-mapped file.
+    """
+    
+    # Set h, w based on the path
+    if '/rgb1' in os.path.dirname(path):
+        h, w = 6556, 4104
+    if '/rgb2' in os.path.dirname(path):
+        h, w = 3006, 4104
+        
+    # set dtype and build shape based on the path.
+    if '/images' in os.path.dirname(path):
+        dtype = 'uint8'
+        shape = (h, w, 3)
+    if '/masks' in os.path.dirname(path):
+        dtype = 'bool'
+        shape = (h, w)
 
-def load_dataset(base_paths, names, dataset_name, pool_size=32):
-    images_base, masks_base = base_paths
-    image_paths, mask_paths = _load_image_names(images_base, masks_base, names)
-    print(f"\nFound {len(image_paths)} images for {dataset_name}.")
-    print(f"Loading {dataset_name} images into memory...")
-    with Pool(pool_size) as p:
-        images, masks = zip(*tqdm(p.imap(_load_image_and_mask, zip(image_paths, mask_paths)), total=len(image_paths)))
-    print(f"{dataset_name} images loaded.")
-    return images, masks
+    np_arr = np.memmap(
+        filename=path,
+        dtype=np.dtype(dtype),
+        mode='r+',
+        shape=shape
+    )
+    return np_arr
 
 def _dilate_masks(mask, tile_size):
     mask = np.array(mask)

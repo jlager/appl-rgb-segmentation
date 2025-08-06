@@ -11,8 +11,6 @@ print(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from multiprocessing import Pool
 from torch.optim import AdamW
 from modules import (
-    data_split,
-    verify_disjoint,
     load_memmap_paths,
     Augmentations,
     BuildDataloader,
@@ -30,10 +28,11 @@ from models import (
 # ===============
 
 PROJECT_ = '/mnt/DGX01/Personal/milliganj/codebase/projects/appl-rgb-segmentation'
-METADATA_ = os.path.join(os.getcwd(), 'data', 'splits', '')
+SPLITS_ = os.path.join(os.getcwd(), 'data', 'metadata')
 DATA_ = os.path.join(os.getcwd(), 'data')
 IMAGES_ = os.path.join(DATA_, 'images')
 MASKS_ = os.path.join(DATA_, 'masks')
+IMAGE_EXT = 'png'
 
 TILE_SIZE = 224
 TRAIN_TILES_PER_IMAGE = 10
@@ -41,7 +40,7 @@ VAL_TILES_PER_IMAGE = 100
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 BATCH_SIZE = 112
-MICRO_BATCH_SIZE = 4
+MICRO_BATCH_SIZE = 7
 GRADIENT_ACCUMULATION_STEPS = BATCH_SIZE // MICRO_BATCH_SIZE
 
 EPOCHS = 1
@@ -65,47 +64,23 @@ if torch.cuda.is_available():
 # === DATA SPLITTING ===
 # ======================  
 
-# Load metadata
-md_path = os.path.join(METADATA_, 'metadata.csv')
-assert os.path.exists(md_path), f"Metadata file not found at {md_path}"
-metadata = pd.read_csv(md_path)
-metadata['Group'] = metadata['Species'].astype(str) + '_' + metadata['Plant ID'].astype(str)
+# Load metadata splits
+md_train =  os.path.join(SPLITS_, 'train.csv')
+md_val =    os.path.join(SPLITS_, 'val.csv')
+md_test =   os.path.join(SPLITS_, 'test.csv')
+assert os.path.exists(md_train), f"Metadata file not found at {md_train}"
+assert os.path.exists(md_val), f"Metadata file not found at {md_val}"
+assert os.path.exists(md_test), f"Metadata file not found at {md_test}"
 
-# Set split options
-n_splits = 1000
-n_samples = 250
-group = 'Group'
-random_state = 42
-
-# Splitting into val/test with GroupShuffleSplit
-train, test = data_split(
-    metadata,
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
-
-train, val = data_split(
-    train, 
-    n_splits=n_splits, 
-    n_samples=n_samples, 
-    group=group, 
-    random_state=random_state
-)
-
-# Verify disjoint on the 'Group' column
-verify_disjoint(train, test, 'Group', verbose=True)
-verify_disjoint(train, val, 'Group', verbose=True)
-verify_disjoint(val, test, 'Group', verbose=True)
-
-
-# === Data Loading ===
+# Dataframes for each split
+md_train = pd.read_csv(md_train)
+md_val = pd.read_csv(md_val)
+md_test = pd.read_csv(md_test)
 
 # Load names for each split
-names_train = train['File Name'].tolist() 
-names_val = val['File Name'].tolist()
-names_test = test['File Name'].tolist()
+names_train = md_train['File Name'].tolist() 
+names_val = md_val['File Name'].tolist()
+names_test = md_test['File Name'].tolist()
 
 # Get memory map paths for images and masks
 train_images, train_masks = load_memmap_paths((IMAGES_, MASKS_), names_train)

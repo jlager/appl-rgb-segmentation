@@ -3,7 +3,8 @@ from .funcs_preprocessing import (
     image_to_memmap,
     mask_to_memmap,
     split,
-    load_dataset,
+    load_memmap,
+    load_memmap_paths,
     mp_dilate_masks
 )
 
