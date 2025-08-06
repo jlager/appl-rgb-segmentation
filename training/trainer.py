@@ -73,7 +73,6 @@ class Trainer:
         assert torch.isfinite(loss).all(), f"Non-finite loss at step {self.step_idx}"
         self.scaler.scale(loss).backward()
         
-        is_accumulation_step = (self.step_idx + 1) % self.gradient_accumulation_steps != 0
         is_last_batch = (self.step_idx + 1) == len(self.train_loader)
                 
         # Update weights if we've accumulated enough gradients
@@ -156,7 +155,9 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Training", )
 
         for batch in pbar:
-            output = self.shared_step(batch, stage="train")
+            output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                     for k, v in self.shared_step(batch, stage="train").items()}
+            
             current_loss = output['loss'].mean()
             current_f1 = output['f1'].mean()
             outputs.append(output)
@@ -175,7 +176,9 @@ class Trainer:
         
         with torch.no_grad():
             for batch in pbar:
-                output = self.shared_step(batch, stage="val")
+                output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                         for k, v in self.shared_step(batch, stage="val").items()}
+                
                 current_loss = output['loss'].mean()
                 current_f1 = output['f1'].mean()
                 outputs.append(output)
