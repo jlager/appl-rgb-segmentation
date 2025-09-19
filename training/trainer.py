@@ -116,8 +116,14 @@ class Trainer():
             scaled_loss = loss / self.gradient_accumulation_steps  
             self.backward(scaled_loss)
             self.update(batch_idx)
+            
+        # Designate a ROI/halo to ignore border artifacts when calculating stats during validation
+        if stage == "val":
+            halo = 64
+            logits = logits[:, :, halo:-halo, halo:-halo]
+            masks = masks[:, halo:-halo, halo:-halo]
 
-        # Get total true positives, false positives, false negatives, true negatives and F1 for batch
+        # Get total true positives, false positives, false negatives, true negatives and F1 for batch.
         with torch.no_grad():
             tp, fp, fn, tn = get_stats(logits, masks, debug=False)
             f1 = fbeta_score(tp, fp, fn, tn, beta=1.0, reduction=None)
