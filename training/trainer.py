@@ -1,10 +1,9 @@
 import torch
 import gc
-import segmentation_models_pytorch as smp
-import timm
 
 from tqdm import tqdm
-
+from typing import Optional
+from torch.utils.tensorboard import SummaryWriter
 from modules import(
     get_stats,
     fbeta_score,
@@ -13,7 +12,8 @@ from modules import(
     specificity,
     false_negative_rate,
 )
-class Trainer:
+
+class Trainer():
     """
     Trainer class for training and validating a segmentation model.
     """
@@ -26,10 +26,14 @@ class Trainer:
         optimizer, 
         criterion,
         scaler,
+        
         device,
+        patience,
         autocast_dtype=None,
-        patience=None,
-        gradient_accumulation_steps=1
+        gradient_accumulation_steps=1,
+        
+        log_path: Optional[str] = None,
+        ckpt_path: Optional[str] = None
         ):
         
         self.model = model
@@ -38,25 +42,38 @@ class Trainer:
         self.optimizer = optimizer
         self.criterion = criterion
         self.scaler = scaler
+        
         self.device = device
         self.patience = patience
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
+        # Matches autocast_dtype string to torch dtype and set self.autocast_dtype
         dtype_map = {
             'float16': torch.float16,
             'bfloat16': torch.bfloat16,
             'float32': torch.float32
         }
         self.autocast_dtype = dtype_map.get(autocast_dtype) if autocast_dtype in dtype_map else None
+        
+        # Initialize TensorBoard writer if log_path is provided
+        if log_path:
+            self.writer = SummaryWriter(log_path)
+            self.current_epoch = 0
+            print(f"TensorBoard logging enabled at {log_path}")
+        else:
+            self.writer = None
+
+        self.ckpt_path = ckpt_path
 
         self.step_idx = 0
-        
-    # shared forward method for training and validation
+
     def forward(self, images, masks):
 
+        # Move data to device
         images = images.to(self.device)
         masks = masks.to(self.device)
 
+        # Forward pass. Use autocast if dtype is specified
         if self.autocast_dtype:
             with torch.autocast(device_type='cuda', dtype=self.autocast_dtype):
                 logits = self.model(images)
@@ -67,21 +84,19 @@ class Trainer:
 
         return logits, loss
 
-    # backward pass for training
     def backward(self, loss):
         
-        assert torch.isfinite(loss).all(), f"Non-finite loss at step {self.step_idx}"
-        self.scaler.scale(loss).backward()
-        
         is_last_batch = (self.step_idx + 1) == len(self.train_loader)
-                
+        
+        self.scaler.scale(loss).backward()
+    
         # Update weights if we've accumulated enough gradients
         if (self.step_idx + 1) % self.gradient_accumulation_steps == 0 or is_last_batch:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
             
-    # shared batch iteration method for training and validation
+
     def shared_step(self, batch, stage):
         
         images = batch[0]
@@ -94,13 +109,12 @@ class Trainer:
         h, w = images.shape[2:]
         assert h % 32 == 0 and w % 32 == 0, "Image dimensions should be divisible by 32"
 
+        # Forward pass
         logits, loss = self.forward(images, masks)
         
+        # Backward pass only during training
         if stage == "train":
             self.backward(loss)
-        
-        self.step_idx += 1
-
         
         # Get total true positives, false positives, false negatives, and true negatives for batch
         tp, fp, fn, tn = get_stats(logits, masks, debug=False)
@@ -108,6 +122,8 @@ class Trainer:
         # Get per batch F1
         f1 = fbeta_score(tp, fp, fn, tn, beta=1.0, reduction=None)
 
+        # Increment step index
+        self.step_idx += 1
 
         return {
             "loss": loss,
@@ -117,88 +133,25 @@ class Trainer:
             "tn": tn,
             "f1": f1,
         }
-    
-    # shared metric gathering for training and validation    
-    def shared_epoch_end(self, outputs, stage, verbose=False):
         
-        # Aggregate stats across all batches
-        loss = torch.stack([out['loss'] for out in outputs])
-        tp = torch.cat([out['tp'] for out in outputs])
-        fp = torch.cat([out['fp'] for out in outputs])
-        fn = torch.cat([out['fn'] for out in outputs])
-        tn = torch.cat([out['tn'] for out in outputs])
+    def save_best_model(self, metric, ckpt_path):
 
-        metrics = {
-            f"{stage}_dataset_loss": loss.mean().item(),
-            f"{stage}_dataset_TPR": sensitivity(tp, fp, fn, tn, reduction="micro"),
-            f"{stage}_dataset_FPR": false_positive_rate(tp, fp, fn, tn, reduction="micro"),
-            f"{stage}_dataset_TNR": specificity(tp, fp, fn, tn, reduction="micro"),
-            f"{stage}_dataset_FNR": false_negative_rate(tp, fp, fn, tn, reduction="micro"),
-            f"{stage}_dataset_f1": fbeta_score(tp, fp, fn, tn, beta=1.0, reduction="micro")
-        }
+        # Create global var for best metric on first call and save model
+        if not hasattr(self, 'best_metric'):
+            self.best_metric = metric
+            torch.save(self.model.state_dict(), ckpt_path)
+            print(f"Initial model saved with {metric:.4f}")
+        
+        # Save model if current metric is better than self.best_metric
+        elif metric > self.best_metric:
+            self.best_metric = metric
+            torch.save(self.model.state_dict(), ckpt_path)
+            print(f"Model improved. Saved new best model with {metric:.4f}")
 
-        if verbose:
-            print(f"Metrics for {stage}:")
-            for key, value in metrics.items():
-                print(f"  {key}: {value:.5f}")
-            print("")
+
+
+    def early_stopping(self, delta, metrics, target_metric):   
             
-        self.step_idx = 0
-        
-        return metrics
-
-    # training step
-    def train(self, verbose=False):
-        
-        self.model.train()
-        outputs = []
-        pbar = tqdm(self.train_loader, desc=f"Training", )
-
-        for batch in pbar:
-            output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
-                     for k, v in self.shared_step(batch, stage="train").items()}
-            
-            current_loss = output['loss'].mean()
-            current_f1 = output['f1'].mean()
-            outputs.append(output)
-
-            pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1.item():.4f}")
-
-        # Return metrics
-        return self.shared_epoch_end(outputs, stage="train", verbose=verbose)
-            
-    # Validation step
-    def validate(self, verbose=False):
-        
-        self.model.eval()
-        outputs = []
-        pbar = tqdm(self.val_loader, desc=f"Validation", )
-        
-        with torch.no_grad():
-            for batch in pbar:
-                output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
-                         for k, v in self.shared_step(batch, stage="val").items()}
-                
-                current_loss = output['loss'].mean()
-                current_f1 = output['f1'].mean()
-                outputs.append(output)
-
-
-                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}")
-
-        # Return metrics
-        return self.shared_epoch_end(outputs, stage="val", verbose=verbose)
-
-    def early_stopping(self, delta, metrics, target_metric):
-        
-        """
-        Check if early stopping criteria are met.
-        If the target metric does not improve for 'patience' epochs,
-        training will be stopped.
-        """
-
-        print(metrics)
-        
         # Ensure the target metric is in the metrics dictionary
         assert target_metric in metrics, f"Target metric '{target_metric}' not found in metrics."
         
@@ -224,46 +177,108 @@ class Trainer:
             print("Early stopping triggered.")
             return True   
         
-        return False     
+        return False    
+
+    def shared_epoch_end(self, outputs, stage, verbose=False):
         
-    def terminate(self):
-        """
-        Clean up resources and finalize training.
-        Called after all epochs are completed.
-        """
+        # Aggregate stats across all batches
+        loss = torch.stack([out['loss'] for out in outputs])
+        tp = torch.cat([out['tp'] for out in outputs])
+        fp = torch.cat([out['fp'] for out in outputs])
+        fn = torch.cat([out['fn'] for out in outputs])
+        tn = torch.cat([out['tn'] for out in outputs])
+
+        # Store metrics
+        metrics = {
+            f"{stage}_dataset_loss": loss.mean().item(),
+            f"{stage}_dataset_TPR": sensitivity(tp, fp, fn, tn, reduction="micro"),
+            f"{stage}_dataset_FPR": false_positive_rate(tp, fp, fn, tn, reduction="micro"),
+            f"{stage}_dataset_TNR": specificity(tp, fp, fn, tn, reduction="micro"),
+            f"{stage}_dataset_FNR": false_negative_rate(tp, fp, fn, tn, reduction="micro"),
+            f"{stage}_dataset_f1": fbeta_score(tp, fp, fn, tn, beta=1.0, reduction="micro")
+        }
+
+        # Log metrics to TensorBoard if writer is available
+        if self.writer:
+            for key, value in metrics.items():
+                tag = key.replace(f"{stage}_dataset_", "")
+                self.writer.add_scalar(f"{stage}/{tag}", value, self.current_epoch)        
         
-        # Free CUDA memory
-        torch.cuda.empty_cache()
-        
-        # Deref dataloaders and collect
-        self.train_loader = None
-        self.val_loader = None
-        gc.collect()
-        
-        # Clear early stopping attributes if they exist
-        if getattr(self, "patience", None) is not None:
-            for attr in ("es_best", "count"):
-                if hasattr(self, attr):
-                    delattr(self, attr)
+        if verbose:
+            print(f"Metrics for {stage}:")
+            for key, value in metrics.items():
+                print(f"  {key}: {value:.5f}")
+            print("")
+
+        # If in validation stage, save checkpoint if target metric improved during validation and check for early stopping   
+        if stage == "val" and self.ckpt_path:
+            self.save_best_model(metrics[f"{stage}_dataset_f1"], self.ckpt_path)
             
-           
-    # Fit method to run training and validation for a specified number of epochs
+            if self.patience is not None:
+                if self.early_stopping(delta=0.01, metrics=metrics, target_metric=f"{stage}_dataset_f1"):
+                    print("Early stopping criteria met. Stopping training.")
+                    raise StopIteration  # Raise an exception to break out of training loop
+                            
+    # training step
+    def train(self, verbose=False):
+        
+        self.model.train()
+        outputs = []
+        pbar = tqdm(self.train_loader, desc=f"Training", )
+
+        for batch in pbar:
+            output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                     for k, v in self.shared_step(batch, stage="train").items()}
+            
+            current_loss = output['loss'].mean()
+            current_f1 = output['f1'].mean()
+            outputs.append(output)
+
+            pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1.item():.4f}")
+
+        # Return metrics
+        return self.shared_epoch_end(outputs, stage="train", verbose=verbose)
+            
+            
+    # Validation step
+    def validate(self, verbose=False):
+        
+        self.model.eval()
+        outputs = []
+        pbar = tqdm(self.val_loader, desc=f"Validation", )
+        
+        with torch.no_grad():
+            for batch in pbar:
+                output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                         for k, v in self.shared_step(batch, stage="val").items()}
+                
+                current_loss = output['loss'].mean()
+                current_f1 = output['f1'].mean()
+                outputs.append(output)
+
+                pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}")
+
+        # Return metrics
+        return self.shared_epoch_end(outputs, stage="val", verbose=verbose)
+                   
+                   
     def fit(self, max_epochs=10, verbose=False):
         try:
             for epoch in range(max_epochs):
-                print(f"Epoch {epoch + 1}/{max_epochs}")
-                train_metric = self.train(verbose=verbose)
-                val_metric = self.validate(verbose=verbose)
                 
-                if self.patience is not None:
-                    if self.early_stopping(delta=0.01, metrics=val_metric, target_metric="val_dataset_f1"):
-                        print("Early stopping criteria met. Stopping training.")
-                        break
+                # Display current epoch
+                print(f"Epoch {epoch + 1}/{max_epochs}")
+                
+                # Train and validate for one epoch
+                self.train(verbose=verbose)
+                self.validate(verbose=verbose)
+                
+                # Reset step index for next epoch and increment current epoch
+                self.step_idx = 0
+                self.current_epoch += 1
 
         except Exception as e:
             print(f"Training interrupted by error: {str(e)}")
             raise e
         finally:
             print("Training finished. Shutting down")
-            self.terminate()  # Clean up resources even if an error occurred
-
