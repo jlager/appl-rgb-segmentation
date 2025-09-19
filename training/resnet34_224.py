@@ -25,8 +25,8 @@ from training import Trainer
 
 TIMESTAMP = time.strftime("%Y%m%d")
 PROJECT_ = '/mnt/DGX01/Personal/milliganj/codebase/projects/appl-rgb-segmentation'
-LOGS_ = os.path.join(PROJECT_, 'evaluation', TIMESTAMP, 'logs', 'unet224')
-CKPT_ = os.path.join(PROJECT_, 'evaluation', TIMESTAMP, 'checkpoints')
+LOGS_ = os.path.join(PROJECT_, 'evaluation', 'tensorboard', TIMESTAMP, 'logs', 'unet224')
+CKPT_ = os.path.join(PROJECT_, 'evaluation', 'tensorboard', TIMESTAMP, 'checkpoints')
 SPLITS_ = os.path.join(os.getcwd(), 'data', 'splits')
 DATA_ = os.path.join(os.getcwd(), 'data')
 IMAGES_ = os.path.join(DATA_, 'images')
@@ -167,7 +167,7 @@ trainer = Trainer(
     patience=5,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
     log_path=LOGS_,
-    ckpt_path=os.path.join(CKPT_, 'unet.pth')
+    ckpt_path=os.path.join(CKPT_, 'unet_224_halotrainval.pth')
 )
 
 trainer.fit(
