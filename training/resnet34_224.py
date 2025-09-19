@@ -1,8 +1,8 @@
-# %%
 import os, sys
 import pandas as pd
 import torch
 import random
+import time
 import segmentation_models_pytorch as smp
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
@@ -17,22 +17,26 @@ from modules import (
     CombinedLoss,
 )
 from training import Trainer
-
-from models import (
-    ViTSegmentation
-)
-
-# %%
+                            
 # ===============
 # === OPTIONS ===
 # ===============
 
+
+TIMESTAMP = time.strftime("%Y%m%d")
 PROJECT_ = '/mnt/DGX01/Personal/milliganj/codebase/projects/appl-rgb-segmentation'
-SPLITS_ = os.path.join(os.getcwd(), 'data', 'metadata')
+LOGS_ = os.path.join(PROJECT_, 'evaluation', TIMESTAMP, 'logs', 'unet224')
+CKPT_ = os.path.join(PROJECT_, 'evaluation', TIMESTAMP, 'checkpoints')
+SPLITS_ = os.path.join(os.getcwd(), 'data', 'splits')
 DATA_ = os.path.join(os.getcwd(), 'data')
 IMAGES_ = os.path.join(DATA_, 'images')
 MASKS_ = os.path.join(DATA_, 'masks')
 IMAGE_EXT = 'png'
+
+if not os.path.exists(LOGS_):
+    os.makedirs(LOGS_)
+if not os.path.exists(CKPT_):
+    os.makedirs(CKPT_)
 
 TILE_SIZE = 224
 TRAIN_TILES_PER_IMAGE = 10
@@ -40,29 +44,29 @@ VAL_TILES_PER_IMAGE = 100
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 BATCH_SIZE = 112
-MICRO_BATCH_SIZE = 7
+MICRO_BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = BATCH_SIZE // MICRO_BATCH_SIZE
 
-EPOCHS = 1
+EPOCHS = 5
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 32
 
-VIT_MODEL = 'vit_small_patch8_224'
-VIT_PRETRAINED = True
+MODEL = 'resnet34'
+WEIGHTS = None
 NUM_CLASSES = 2
-BACKBONE_LR_FACTOR = 0.1
+AUTOCAST_DTYPE = "float16"
 
-DEVICE = torch.device("cuda:0")
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(SEED)
-
+    
 # ======================    
-# === DATA SPLITTING ===
-# ======================  
+# === DATA LOADING ===
+# ======================    
 
 # Load metadata splits
 md_train =  os.path.join(SPLITS_, 'train.csv')
@@ -88,6 +92,8 @@ print(f"Found {len(train_images)} training images and {len(train_masks)} trainin
 
 val_images, val_masks = load_memmap_paths((IMAGES_, MASKS_), names_val)
 print(f"Found {len(val_images)} validation images and {len(val_masks)} validation masks.\n")
+
+# test_images, test_masks = load_dataset((images_base, masks_base), names_test, "Test")
 
 # Build datasets and dataloaders
 train_dataset, train_dataloader = BuildDataloader.build_dataloader(
@@ -120,32 +126,35 @@ val_dataset, val_dataloader = BuildDataloader.build_dataloader(
     persistent_workers=True,
 )
 
+# test_dataset, test_dataloader = BuildDataloader.build_dataloader(
+#     images=test_images,
+#     masks=test_masks,
+#     dilated_masks=dmasks_test,
+#     batch_size=BATCH_SIZE,
+#     tile_size=TILE_SIZE,
+#     transform=Augmentations.get_valid_transform(IMAGENET_MEAN, IMAGENET_STD),
+#     tiles_per_image=TEST_TILES_PER_IMAGE,
+#     mix_ratio=0.25,
+    
+#     num_workers=32,
+#     pin_memory=True,
+#     persistent_workers=True,
+# )
 
-# %%
-# instantiate ViT model with pre-trained weights
-model = ViTSegmentation(
-    vit_model=VIT_MODEL, 
-    img_size=TILE_SIZE,
-    pretrained=VIT_PRETRAINED,
-    num_classes=NUM_CLASSES)
-model = model.to(DEVICE)
 
-# configure parameter groups with different learning rates
-encoder_params = model.encoder.parameters()
-decoder_params = model.decoder.parameters()
-param_groups = [
-    {'params': encoder_params, 'lr': LR * BACKBONE_LR_FACTOR},
-    {'params': decoder_params, 'lr': LR}
-]
+# === Model Training ===    
 
-# instantiate optimizer
-optimizer = AdamW(param_groups, weight_decay=WEIGHT_DECAY)
-# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-#     optimizer, 
-#     T_max=EPOCHS, 
-#     eta_min=LR / 10)
+# Initialize the model
+model = smp.Unet(
+    encoder_name="resnet34",       
+    encoder_weights=None,    
+    in_channels=3,                   
+    classes=2,                       
+).to(DEVICE)
+
+optimizer = AdamW(model.parameters(), lr=LR)
 criterion = CombinedLoss(weight_ce=0.5, weight_dice=0.5)
-scaler = torch.amp.GradScaler()
+scaler = torch.amp.GradScaler('cuda')
 
 trainer = Trainer(
     model=model, 
@@ -155,17 +164,13 @@ trainer = Trainer(
     criterion=criterion,
     scaler=scaler,
     device=DEVICE,
-    autocast_dtype='float16',  # Using bfloat16 for ViT
-    patience=None,
+    patience=5,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    log_path=LOGS_,
+    ckpt_path=os.path.join(CKPT_, 'unet.pth')
 )
 
 trainer.fit(
     max_epochs=EPOCHS,
     verbose=True
 )
-
-# %%
-
-
-
