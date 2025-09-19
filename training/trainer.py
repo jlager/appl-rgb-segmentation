@@ -51,21 +51,20 @@ class Trainer():
         dtype_map = {
             'float16': torch.float16,
             'bfloat16': torch.bfloat16,
-            'float32': torch.float32
         }
         self.autocast_dtype = dtype_map.get(autocast_dtype) if autocast_dtype in dtype_map else None
         
         # Initialize TensorBoard writer if log_path is provided
         if log_path:
             self.writer = SummaryWriter(log_path)
-            self.current_epoch = 0
             print(f"TensorBoard logging enabled at {log_path}")
         else:
             self.writer = None
 
         self.ckpt_path = ckpt_path
+        
+        self.current_epoch = 0
 
-        self.step_idx = 0
 
     def forward(self, images, masks):
 
@@ -75,7 +74,7 @@ class Trainer():
 
         # Forward pass. Use autocast if dtype is specified
         if self.autocast_dtype:
-            with torch.autocast(device_type='cuda', dtype=self.autocast_dtype):
+            with torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype):
                 logits = self.model(images)
                 loss = self.criterion(logits, masks)
         else:
@@ -86,19 +85,19 @@ class Trainer():
 
     def backward(self, loss):
         
-        is_last_batch = (self.step_idx + 1) == len(self.train_loader)
-        
         self.scaler.scale(loss).backward()
     
+    def update(self, idx):
+
         # Update weights if we've accumulated enough gradients
-        if (self.step_idx + 1) % self.gradient_accumulation_steps == 0 or is_last_batch:
+        is_last_batch = (idx + 1) == len(self.train_loader)
+        if (idx + 1) % self.gradient_accumulation_steps == 0 or is_last_batch:
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            self.optimizer.zero_grad()
-            
+            self.optimizer.zero_grad(set_to_none=True)
 
-    def shared_step(self, batch, stage):
-        
+    def shared_step(self, batch, stage, batch_idx=None):
+
         images = batch[0]
         assert images.ndim == 4, "Images should be a 4D tensor (batch_size, channels, height, width)"
         
@@ -111,19 +110,17 @@ class Trainer():
 
         # Forward pass
         logits, loss = self.forward(images, masks)
-        
-        # Backward pass only during training
-        if stage == "train":
-            self.backward(loss)
-        
-        # Get total true positives, false positives, false negatives, and true negatives for batch
-        tp, fp, fn, tn = get_stats(logits, masks, debug=False)
-        
-        # Get per batch F1
-        f1 = fbeta_score(tp, fp, fn, tn, beta=1.0, reduction=None)
 
-        # Increment step index
-        self.step_idx += 1
+        # Scale loss to account for grad accumulation; Backward pass + updates
+        if stage == "train":
+            scaled_loss = loss / self.gradient_accumulation_steps  
+            self.backward(scaled_loss)
+            self.update(batch_idx)
+
+        # Get total true positives, false positives, false negatives, true negatives and F1 for batch
+        with torch.no_grad():
+            tp, fp, fn, tn = get_stats(logits, masks, debug=False)
+            f1 = fbeta_score(tp, fp, fn, tn, beta=1.0, reduction=None)
 
         return {
             "loss": loss,
@@ -147,7 +144,6 @@ class Trainer():
             self.best_metric = metric
             torch.save(self.model.state_dict(), ckpt_path)
             print(f"Model improved. Saved new best model with {metric:.4f}")
-
 
 
     def early_stopping(self, delta, metrics, target_metric):   
@@ -219,62 +215,60 @@ class Trainer():
                     print("Early stopping criteria met. Stopping training.")
                     raise StopIteration  # Raise an exception to break out of training loop
                             
-    # training step
     def train(self, verbose=False):
         
+        # Training mode; bookkeeping for metrics; progress bar
         self.model.train()
         outputs = []
         pbar = tqdm(self.train_loader, desc=f"Training", )
 
-        for batch in pbar:
-            output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
-                     for k, v in self.shared_step(batch, stage="train").items()}
+        # For each index, batch in the training dataloader...
+        for idx, batch in enumerate(pbar):
             
-            current_loss = output['loss'].mean()
-            current_f1 = output['f1'].mean()
+            # Obtain dictionary of output tensors for current batch. Move tensors to CPU and detach. Store in outputs list
+            output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                      for k, v in self.shared_step(batch, "train", idx).items()}
             outputs.append(output)
 
+            # Loss and F1 are aggregated over all batches into outputs[]. Take the mean of these and report in pbar
+            current_loss = output['loss'].mean()
+            current_f1 = output['f1'].mean()
             pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1.item():.4f}")
 
         # Return metrics
         return self.shared_epoch_end(outputs, stage="train", verbose=verbose)
             
-            
-    # Validation step
+ 
     def validate(self, verbose=False):
-        
+         
+        # Similar to train() except we do backward pass or updates, hence, no need to pass batch idx into self.shared_step()
         self.model.eval()
         outputs = []
         pbar = tqdm(self.val_loader, desc=f"Validation", )
-        
-        with torch.no_grad():
+
+        with torch.inference_mode():
             for batch in pbar:
                 output = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
-                         for k, v in self.shared_step(batch, stage="val").items()}
+                         for k, v in self.shared_step(batch, "val").items()}
+                outputs.append(output)
                 
                 current_loss = output['loss'].mean()
                 current_f1 = output['f1'].mean()
-                outputs.append(output)
-
                 pbar.set_postfix(loss=f"{current_loss:.4e}", f1=f"{current_f1:.4f}")
 
-        # Return metrics
         return self.shared_epoch_end(outputs, stage="val", verbose=verbose)
                    
                    
     def fit(self, max_epochs=10, verbose=False):
+        
         try:
+            # For each epoch in the range of max_epochs...
             for epoch in range(max_epochs):
                 
-                # Display current epoch
+                # Display epoch progress; train model; validate model; increment epoch counter
                 print(f"Epoch {epoch + 1}/{max_epochs}")
-                
-                # Train and validate for one epoch
                 self.train(verbose=verbose)
                 self.validate(verbose=verbose)
-                
-                # Reset step index for next epoch and increment current epoch
-                self.step_idx = 0
                 self.current_epoch += 1
 
         except Exception as e:
