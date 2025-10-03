@@ -26,11 +26,13 @@ class Trainer():
         optimizer, 
         criterion,
         scaler,
+        scheduler,
         
         device,
         patience,
         autocast_dtype=None,
         gradient_accumulation_steps=1,
+        lr_warmup_epochs=0,
         
         log_path: Optional[str] = None,
         ckpt_path: Optional[str] = None
@@ -42,10 +44,12 @@ class Trainer():
         self.optimizer = optimizer
         self.criterion = criterion
         self.scaler = scaler
-        
+        self.scheduler = scheduler
+
         self.device = device
         self.patience = patience
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.lr_warmup_epochs = lr_warmup_epochs
 
         # Matches autocast_dtype string to torch dtype and set self.autocast_dtype
         dtype_map = {
@@ -54,7 +58,7 @@ class Trainer():
         }
         self.autocast_dtype = dtype_map.get(autocast_dtype) if autocast_dtype in dtype_map else None
         
-        # Initialize TensorBoard writer if log_path is provided
+        # If log_path specified... create TensorBoard SummaryWriter
         if log_path:
             self.writer = SummaryWriter(log_path)
             print(f"TensorBoard logging enabled at {log_path}")
@@ -67,19 +71,19 @@ class Trainer():
 
 
     def forward(self, images, masks):
-
+        
         # Move data to device
         images = images.to(self.device)
         masks = masks.to(self.device)
-
-        # Forward pass. Use autocast if dtype is specified
+        
+        # If autocast dtype specified... use autocast context manager for mixed precision
         if self.autocast_dtype:
-            with torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype):
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.autocast_dtype):
                 logits = self.model(images)
-                loss = self.criterion(logits, masks)
         else:
             logits = self.model(images)
-            loss = self.criterion(logits, masks)
+        
+        loss = self.criterion(logits, masks)
 
         return logits, loss
 
@@ -89,7 +93,7 @@ class Trainer():
     
     def update(self, idx):
 
-        # Update weights if we've accumulated enough gradients
+        # If we've accumulated enough gradients or it's the last batch... update weights
         is_last_batch = (idx + 1) == len(self.train_loader)
         if (idx + 1) % self.gradient_accumulation_steps == 0 or is_last_batch:
             self.scaler.step(self.optimizer)
@@ -98,6 +102,7 @@ class Trainer():
 
     def shared_step(self, batch, stage, batch_idx=None):
 
+        # Assert correct dimensions for images and masks
         images = batch[0]
         assert images.ndim == 4, "Images should be a 4D tensor (batch_size, channels, height, width)"
         
@@ -111,13 +116,13 @@ class Trainer():
         # Forward pass
         logits, loss = self.forward(images, masks)
 
-        # Scale loss to account for grad accumulation; Backward pass + updates
+        # If training... scale loss to account for grad accumulation; Backward pass + updates
         if stage == "train":
             scaled_loss = loss / self.gradient_accumulation_steps  
             self.backward(scaled_loss)
             self.update(batch_idx)
-            
-        # Designate a ROI/halo to ignore border artifacts when calculating stats during validation
+
+        # If validating... designate a ROI/halo to ignore border artifacts when calculating stats during validation
         if stage == "val":
             halo = 64
             logits = logits[:, :, halo:-halo, halo:-halo]
@@ -139,42 +144,74 @@ class Trainer():
         
     def save_best_model(self, metric, ckpt_path):
 
-        # Create global var for best metric on first call and save model
+        # If no self.best_metric attribute exists... create it and save the model
         if not hasattr(self, 'best_metric'):
             self.best_metric = metric
             torch.save(self.model.state_dict(), ckpt_path)
             print(f"Initial model saved with {metric:.4f}")
-        
-        # Save model if current metric is better than self.best_metric
+
+        # Else... if recieved metric value > self.best_metric, save model
         elif metric > self.best_metric:
             self.best_metric = metric
             torch.save(self.model.state_dict(), ckpt_path)
             print(f"Model improved. Saved new best model with {metric:.4f}")
 
-
-    def early_stopping(self, delta, metrics, target_metric):   
-            
-        # Ensure the target metric is in the metrics dictionary
-        assert target_metric in metrics, f"Target metric '{target_metric}' not found in metrics."
+    def lr_warmup(self):
         
-        # Get current metric value from passed metrics dict
+        # Get max_lr from optimizer's initial lr
+        max_lr = self.optimizer.param_groups[0]['lr']
+        
+        # If on first epoch... set lr to 1% of max_lr.
+        if self.current_epoch == 0:
+            warmup_lr = max_lr * 0.01
+            
+        # Else... linearly scale lr based on current epoch
+        else:
+            progress = min(self.current_epoch / self.lr_warmup_epochs, 1.0)   # Increment factor determined by epoch progress
+            warmup_lr = max_lr * progress
+
+        # Set lr for all param groups
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = warmup_lr
+        
+        
+    def scheduler_step(self, metric=None):
+
+        # If scheduler exists...
+        if self.scheduler:
+            
+            # If metric is provided... step with metric
+            if metric is not None:
+                self.scheduler.step(metric)
+     
+            # Else... step normally
+            else:
+                self.scheduler.step()
+
+
+    def early_stopping(self, delta, metrics, target_metric):
+            
+        # Assert target metric is in metrics dict and grab
+        assert target_metric in metrics, f"Target metric '{target_metric}' not found in metrics."
         current_metric = metrics[target_metric]
 
-        # Initialize es_best and count if not already set. Absence of one will imply the absence of the other
+        # If no self.es_best attribute exists... create it and initialize count
         if not hasattr(self, 'es_best'):
             self.es_best = current_metric
             self.count = 0
         
-        # Check if current metric is better than the best seen so far
+        # Else, if current metric improved beyond delta threshold... set new best and reset count
         elif current_metric > self.es_best + delta:
             print(f"Improvement detected: {current_metric:.4f} > {self.es_best:.4f}. Resetting early stopping counter.")
             self.es_best = current_metric
             self.count = 0
+            
+        # Else... increment count
         else:
             self.count += 1
             print(f"Early stopping patience: {self.count}/{self.patience}")
 
-        # If count exceeds patience, trigger early stopping
+        # If count exceeds patience... trigger early stopping
         if self.count >= self.patience:
             print("Early stopping triggered.")
             return True   
@@ -200,26 +237,27 @@ class Trainer():
             f"{stage}_dataset_f1": fbeta_score(tp, fp, fn, tn, beta=1.0, reduction="micro")
         }
 
-        # Log metrics to TensorBoard if writer is available
+        # If TensorBoard writer exists... log metrics
         if self.writer:
             for key, value in metrics.items():
                 tag = key.replace(f"{stage}_dataset_", "")
                 self.writer.add_scalar(f"{stage}/{tag}", value, self.current_epoch)        
         
+        # If verbose... print metrics to console
         if verbose:
             print(f"Metrics for {stage}:")
             for key, value in metrics.items():
                 print(f"  {key}: {value:.5f}")
             print("")
 
-        # If in validation stage, save checkpoint if target metric improved during validation and check for early stopping   
+        # If in validation stage... save checkpoint if target metric improved during validation and check for early stopping   
         if stage == "val" and self.ckpt_path:
             self.save_best_model(metrics[f"{stage}_dataset_f1"], self.ckpt_path)
             
             if self.patience is not None:
                 if self.early_stopping(delta=0.01, metrics=metrics, target_metric=f"{stage}_dataset_f1"):
                     print("Early stopping criteria met. Stopping training.")
-                    raise StopIteration  # Raise an exception to break out of training loop
+                    raise StopIteration
                             
     def train(self, verbose=False):
         
@@ -275,6 +313,15 @@ class Trainer():
                 print(f"Epoch {epoch + 1}/{max_epochs}")
                 self.train(verbose=verbose)
                 self.validate(verbose=verbose)
+                
+                # If self.current_epoch < self.lr_warmup_epochs... step lr warmup
+                if self.current_epoch < self.lr_warmup_epochs:
+                    self.lr_warmup(max_lr=self.max_lr)
+
+                # If self.current_epoch > self.lr_warmup_epochs and scheduler exists... step scheduler
+                if self.scheduler and epoch >= self.lr_warmup_epochs:
+                    self.scheduler_step()
+                    
                 self.current_epoch += 1
 
         except Exception as e:
