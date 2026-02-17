@@ -42,5 +42,10 @@ CHECKPOINT_PATH = os.path.join(
 LOG_PATH = os.path.join(
     'outputs', 'logs', 'log_model-{}_tile-{}.csv')
 
+# evaluation
+EVAL_BATCH_SIZE = 32
+METRICS_PATH = os.path.join(
+    'outputs', 'metrics', 'metrics_model-{}_tile-{}_split-{}.csv')
+
 # random seeds
 SEED = 42
