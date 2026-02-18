@@ -11,14 +11,14 @@ torch.set_num_threads(1)                           # stop using all CPU threads
 torch.set_num_interop_threads(1)                   # stop using all CPU threads
 
 import random
+import time
 import numpy as np
 import pandas as pd
 import argparse
-import collections
 from tqdm import tqdm
 from typing import List, Tuple
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+from contextlib import nullcontext
+import torch.nn.functional as F
 
 import models
 import config
@@ -64,140 +64,107 @@ def load_images_and_masks(
 # Segmentation
 # =============================================================================
 
-def is_topview(width: int, height: int) -> bool:
-    """Determine if image is topview (wider) or sideview (taller)"""
-    return width > height
+def _normalize_image(
+    image: np.ndarray,
+    mean: List[float] = config.IMAGENET_MEAN,
+    std: List[float] = config.IMAGENET_STD,
+) -> np.ndarray:
+    im = image.astype(np.float32, copy=False) / 255.0
+    mean_arr = np.asarray(mean, dtype=np.float32)
+    std_arr = np.asarray(std, dtype=np.float32)
+    return (im - mean_arr) / std_arr
 
-def get_tile_boundary(
-    center_row: int, 
-    center_col: int, 
-    tile_size: int,
-) -> Tuple[int, int, int, int]:
-    """Get the boundary coordinates for a tile given its center"""
-    left = center_col - tile_size // 2
-    top = center_row - tile_size // 2
-    right = center_col + tile_size // 2
-    bottom = center_row + tile_size // 2
-    return (left, top, right, bottom)
+def _generate_tile_coords(
+    height: int,
+    width: int,
+    window_size: int,
+) -> List[Tuple[int, int]]:
+    coords: List[Tuple[int, int]] = []
+    stride = window_size // 2
 
-# inference transform
-transform = A.Compose([
-    A.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
-    ToTensorV2(),
-])
+    for r in range(0, height - window_size + 1, stride):
+        for c in range(0, width - window_size + 1, stride):
+            coords.append((r, c))
+
+    for c in range(0, width - window_size + 1, stride):
+        coords.append((height - window_size, c))
+    for r in range(0, height - window_size + 1, stride):
+        coords.append((r, width - window_size))
+    coords.append((height - window_size, width - window_size))
+
+    seen = set()
+    uniq_coords = []
+    for rc in coords:
+        if rc not in seen:
+            seen.add(rc)
+            uniq_coords.append(rc)
+    return uniq_coords
+
+def _generate_hann_weights(window_size: int) -> np.ndarray:
+    w1d = torch.hann_window(window_size, periodic=False, dtype=torch.float32)
+    weight2d = torch.outer(w1d, w1d).clamp_min(1e-6)
+    return weight2d.cpu().numpy()
 
 def segment(
     image: np.ndarray,
-    model: torch.nn.Module, 
+    model: torch.nn.Module,
     tile_size: int,
-    step: int, 
     batch_size: int = 64,
-    threshold: float = 0.5,
     n_classes: int = 2,
 ) -> Tuple[np.ndarray, np.ndarray]:
     
-    # initialize
     H, W, _ = image.shape
     C = n_classes
+    ws = min(tile_size, H, W)
+    normalized = _normalize_image(image, config.IMAGENET_MEAN, config.IMAGENET_STD)
+    coords = _generate_tile_coords(H, W, ws)
+    weight2d_np = _generate_hann_weights(ws)
+
+    prob_acc = np.zeros((C, H, W), dtype=np.float32)
+    weight_acc = np.zeros((H, W), dtype=np.float32)
+
     device = next(model.parameters()).device
     model.eval()
-    
-    # initialize book keeping
-    prob_accum = torch.zeros((C, H, W), dtype=torch.float32, device=device)
-    count_accum = torch.zeros((H, W), dtype=torch.float32, device=device)
-    visited = set()
-    
-    # use a queue for flood-fill like processing
-    queue = collections.deque()
-    
-    # initialize with a grid of non-overlapping tiles across the entire image
-    for row in range(tile_size//2, H, tile_size):
-        for col in range(tile_size//2, W, tile_size):
-            queue.append((row, col))
-    
-    while queue:
-        
-        # process tiles in batches for efficiency
-        tiles = []
-        boundaries = []
-        coords = []
-        
-        # collect up to batch_size tiles to process
-        while queue and len(tiles) < batch_size:
-            row, col = queue.popleft()
-            
-            # skip if already visited
-            coord_key = (row, col)
-            if coord_key in visited:
-                continue
-                
-            # mark as visited
-            visited.add(coord_key)
-            
-            # get tile boundary
-            left, top, right, bottom = get_tile_boundary(row, col, tile_size)
-            
-            # skip if out of bounds
-            if left < 0 or top < 0 or right > W or bottom > H:
-                continue
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
-            # extract tile
-            tile = image[top:bottom, left:right, :]
-            augmented = transform(image=tile)
-            tiles.append(augmented['image'].unsqueeze(0).to(device))
-            boundaries.append((left, top, right, bottom))
-            coords.append((row, col))
-        
-        # if no tiles to process, we're done
-        if not tiles:
-            break
+    coord_idx = 0
+    tiles_total = len(coords)
+    with torch.inference_mode():
+        while coord_idx < tiles_total:
+            batch_coords = coords[coord_idx : coord_idx + batch_size]
+            b = len(batch_coords)
 
-        # process batch
-        with torch.no_grad():
-            batch = torch.cat(tiles, dim=0)
-            probs = torch.softmax(model(batch), dim=1)
-        
-        # add neighbors of tiles with segmented content to queue
-        has_new_tiles = False
-        for i, ((row, col), (left, top, right, bottom)) in enumerate(zip(coords, boundaries)):
-            tile_probs = probs[i]
-            
-            # save tile probabilities
-            prob_accum[:, top:bottom, left:right] += tile_probs
-            count_accum[top:bottom, left:right] += 1
-            
-            # check if this tile detects segmentation
-            if C == 1:
-                has_content = (tile_probs[0] > threshold).any().item()
+            batch_np = np.empty((b, 3, ws, ws), dtype=np.float32)
+            for i, (r, c) in enumerate(batch_coords):
+                tile = normalized[r : r + ws, c : c + ws, :]
+                batch_np[i] = tile.transpose(2, 0, 1)
+
+            batch = torch.from_numpy(batch_np)
+            if device.type == "cuda":
+                batch = batch.pin_memory().to(device, non_blocking=True)
             else:
-                has_content = (torch.argmax(tile_probs, dim=0) > 0).any().item()
-            
-            # if so, add 4-connected neighbors
-            if has_content:
-                has_new_tiles = True
-                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nr, nc = row + dr * step, col + dc * step
-                    if (nr, nc) not in visited:
-                        queue.append((nr, nc))
-        
-        # if no tiles had content, and queue is empty, break early
-        if not has_new_tiles and not queue:
-            break
-    
-    # build final mask
-    with torch.no_grad():
-        mask = count_accum > 0
-        final_probs = torch.zeros_like(prob_accum)
-        final_probs[:, mask] = prob_accum[:, mask] / count_accum[mask]
-        final_probs = final_probs.cpu()
-        
-        # threshold probabilities to get final mask [H, W]
-        if C == 1:
-            final_mask = (final_probs[0] > threshold).astype(np.uint8)
-        else:
-            final_mask = torch.argmax(final_probs, dim=0).numpy().astype(np.uint8)
+                batch = batch.to(device)
 
-    return final_mask, final_probs.numpy()
+            amp_ctx = (
+                torch.amp.autocast('cuda', dtype=torch.float16)
+                if device.type == "cuda"
+                else nullcontext()
+            )
+            with amp_ctx:
+                logits = model(batch)
+            probs = F.softmax(logits, dim=1).float().cpu().numpy()
+
+            for i, (r, c) in enumerate(batch_coords):
+                prob_acc[:, r : r + ws, c : c + ws] += probs[i] * weight2d_np[None, :, :]
+                weight_acc[r : r + ws, c : c + ws] += weight2d_np
+
+            coord_idx += b
+
+    weight_acc = np.clip(weight_acc, 1e-6, None)
+    final_probs = prob_acc / weight_acc[None, :, :]
+    final_mask = final_probs.argmax(axis=0).astype(np.uint8)
+    return final_mask, final_probs
 
 def compute_image_dice(preds: np.ndarray, targets: np.ndarray) -> float:
     # preds: [H, W]; targets: [H, W]
@@ -241,20 +208,24 @@ def main():
     train_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'train.csv'))
     val_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'val.csv'))
     test_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'test.csv'))
+    gen_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'generalization.csv'))
     train_image_paths, train_mask_paths, _ = get_paths(train_df)
     val_image_paths, val_mask_paths, _ = get_paths(val_df)
     test_image_paths, test_mask_paths, _ = get_paths(test_df)
+    gen_image_paths, gen_mask_paths, _ = get_paths(gen_df)
 
     # load image/mask memmaps
     print("Loading images and masks...")
     train_images, train_masks = load_images_and_masks(train_image_paths, train_mask_paths)
     val_images, val_masks = load_images_and_masks(val_image_paths, val_mask_paths)
     test_images, test_masks = load_images_and_masks(test_image_paths, test_mask_paths)
+    gen_images, gen_masks = load_images_and_masks(gen_image_paths, gen_mask_paths)
 
     # print dataset sizes
     print(f"Train dataset size: {len(train_images)} images")
     print(f"Val dataset size: {len(val_images)} images")
     print(f"Test dataset size: {len(test_images)} images")
+    print(f"Generalization dataset size: {len(gen_images)} images")
 
     # instantiate model
     model = models.build_model(
@@ -276,7 +247,13 @@ def main():
     train_df['Dice'] = np.nan
     val_df['Dice'] = np.nan
     test_df['Dice'] = np.nan
-    columns = list(train_df.columns)
+    gen_df['Dice'] = np.nan
+    train_df['Time (s)'] = np.nan
+    val_df['Time (s)'] = np.nan
+    test_df['Time (s)'] = np.nan
+    gen_df['Time (s)'] = np.nan
+    tvt_columns = list(train_df.columns)
+    gen_columns = list(gen_df.columns)
 
     # create metrics directory if it doesn't exist
     os.makedirs(os.path.dirname(config.METRICS_PATH), exist_ok=True)
@@ -285,12 +262,15 @@ def main():
     train_split = ('train', train_images, train_masks, train_df)
     val_split = ('val', val_images, val_masks, val_df)
     test_split = ('test', test_images, test_masks, test_df)
-    for split, images, masks, df in [train_split, val_split, test_split]:
+    gen_split = ('generalization', gen_images, gen_masks, gen_df)
+    for split, images, masks, df in [train_split, val_split, test_split, gen_split]:
+
 
         # initialize
         print(f"Evaluating on {split} set...")
         dices = []
         metrics_path = config.METRICS_PATH.format(backbone, tile_size, split)
+        columns = gen_columns if split == 'generalization' else tvt_columns
         with open(metrics_path, 'w') as f:
             f.write(','.join(columns) + '\n')
 
@@ -298,14 +278,23 @@ def main():
         for i in tqdm(range(len(images))):
             image = np.array(images[i])
             mask = np.array(masks[i])
+
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            start_time = time.perf_counter()
             preds, _ = segment(
                 image, model, 
-                tile_size=tile_size, step=tile_size//2, 
+                tile_size=tile_size,
                 batch_size=config.EVAL_BATCH_SIZE, 
-                threshold=0.5, n_classes=2)
+                n_classes=2)
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            inference_time = time.perf_counter() - start_time
+
             dice = compute_image_dice(preds, mask)
             dices.append(dice)
             df.at[i, 'Dice'] = dice
+            df.at[i, 'Time (s)'] = inference_time
             with open(metrics_path, 'a') as f:
                 f.write(','.join([str(df.iloc[i][c]) for c in columns]) + '\n')
 
