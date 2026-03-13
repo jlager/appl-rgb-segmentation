@@ -266,11 +266,19 @@ def get_lr(epoch, max_lr, min_lr):
 
 def parse_args():
     # example: python train.py --backbone "vit_base_patch8_224" --tile_size 448 --device 0
+    # for sam2 models there seem to be two versions of each for different checkpoint tags
+    # calling w/o extension will use the original
     parser = argparse.ArgumentParser(description='Train segmentation model')
     parser.add_argument('--backbone', type=str, default='vit_base_patch8_224', 
                        choices=['vit_small_patch8_224', 'vit_small_patch16_224',
                                 'vit_base_patch8_224', 'vit_base_patch16_224',
-                                'resnet34', 'resnet50', 'resnet101', 'resnet152'],
+                                'sam2_hiera_base_plus', 'sam2_hiera_large', 
+                                'sam2_hiera_small', 'sam2_hiera_tiny', 
+                                'samvit_base_patch16', 'samvit_base_patch16_224',
+                                'samvit_huge_patch16', 'samvit_large_patch16', 
+                                'vit_base_patch16_224', 'vit_base_patch32_224',
+                                'resnet34', 'resnet50', 
+                                'resnet101', 'resnet152'],
                        help='Model backbone')
     parser.add_argument('--tile_size', type=int, default=448, 
                         choices=[224, 448],
@@ -286,7 +294,7 @@ def main():
     # set global variables based on args
     tile_size = args.tile_size
     backbone = args.backbone
-    model_type = ['vit', 'unet']['resnet' in backbone] 
+    model_type = ['vit', 'sam', 'sam2', 'unet']['resnet' in backbone] 
     device = torch.device(f'cuda:{args.device}')
 
     # create output directories
