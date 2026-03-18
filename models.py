@@ -151,65 +151,88 @@ class SegmentationModel(torch.nn.Module):
     ) -> None:
         
         super().__init__()
-        self.verbose = verbose
-        self.image_size = image_size
-        self.model_type = model_type
-
-        # build segmentation encoder (Pytorch Image Models ViT)
+        extra_kwargs = {}
         if model_type == 'vit':
-            self.encoder = timm.create_model(
-                backbone, 
-                pretrained=pretrained, 
-                features_only=True,
-                out_indices=(-1,),
-                img_size=image_size,
-            )
-
-        # build segmentation encoder (Pytorch Image Models SAM)
+            extra_kwargs['image_size'] = image_size
+        
         elif model_type == 'sam':
-            self.encoder = timm.create_model(
-                backbone, 
-                pretrained=pretrained, 
-                features_only=True,
-                out_indices=(-1,),
-                img_size=1024,
-            )
+            extra_kwargs['img_size'] = 1024
+
+        # Build segmentation encoder
+        self.encoder = timm.create_model(
+            backbone, 
+            pretrained=pretrained, 
+            features_only=True,
+            out_indices=(-1,),
+            **extra_kwargs,
+        )
+
+        # When working w/ ViT backbones, we'll want to get patch size. _get_patch_size() obtains this but needs image dimensions.
+        # Grab dimensions from extra_kwargs
+        if model_type != 'unet':
+            self.image_size = extra_kwargs.get('image_size', extra_kwargs.get('img_size', image_size))
+
+
+        self.verbose = verbose
+
+
+        hidden_dim = self.encoder.feature_info.channels()[-1]
+        patch_size = self._get_patch_size()
+        self.decoder = self._build_decoder(hidden_dim, patch_size, num_classes)
+
+        # # build segmentation encoder (Pytorch Image Models ViT)
+        # if model_type == 'vit':
+        #     self.encoder = timm.create_model(
+        #         backbone, 
+        #         pretrained=pretrained, 
+        #         features_only=True,
+        #         out_indices=(-1,),
+        #         img_size=image_size,
+        #     )
+
+        # # build segmentation encoder (Pytorch Image Models SAM)
+        # elif model_type == 'sam':
+        #     self.encoder = timm.create_model(
+        #         backbone, 
+        #         pretrained=pretrained, 
+        #         features_only=True,
+        #         out_indices=(-1,),
+        #         img_size=1024,
+        #     )
         
-        # build segmentation encoder (Pytorch Image Models SAM2)
-        elif model_type == 'sam2':
-            self.encoder = timm.create_model(
-                backbone, 
-                pretrained=pretrained, 
-                features_only=True,
-                out_indices=(-1,),
-            )
+        # # build segmentation encoder (Pytorch Image Models SAM2)
+        # elif model_type == 'sam2':
+        #     self.encoder = timm.create_model(
+        #         backbone, 
+        #         pretrained=pretrained, 
+        #         features_only=True,
+        #         out_indices=(-1,),
+        #     )
         
-        # build segmentation encoder (Meta SAM3)
-        # bpe_path is hardcoded b/c from a cloned directory b/c my environment install doesn't have it
-        elif model_type == 'sam3':
-            self.model = build_sam3_image_model(
-                bpe_path="/mnt/DGX01/Personal/milliganj/codebase/gits/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
-                eval_mode=False,
-                device=torch.device("cpu"),  # Moved to GPU later.
-                checkpoint_path=checkpoint_path,
-                load_from_HF=False,
-                enable_segmentation=True
-            )
-        else:
-            raise ValueError(f"Model type {model_type} not supported")
+        # # build segmentation encoder (Meta SAM3)
+        # # bpe_path is hardcoded b/c from a cloned directory b/c my environment install doesn't have it
+        # elif model_type == 'sam3':
+        #     self.model = build_sam3_image_model(
+        #         bpe_path="/mnt/DGX01/Personal/milliganj/codebase/gits/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
+        #         eval_mode=False,
+        #         device=torch.device("cpu"),  # Moved to GPU later.
+        #         checkpoint_path=checkpoint_path,
+        #         load_from_HF=False,
+        #         enable_segmentation=True
+        #     )
+        # else:
+        #     raise ValueError(f"Model type {model_type} not supported")
 
 
         # 1. get hidden dimension from encoder
         # 2. determine initial downsampling factor (patch size) from output stride
-        # 3. build segmentation decoder
-        if model_type == 'sam3':
-            self.encoder = self.model.backbone.forward_image    # Entrypoint for the SAM3 encoder
-            hidden_dim = self.model.hidden_dim
-        else:
-            hidden_dim = self.encoder.feature_info.channels()[-1]
-        
-        patch_size = self._get_patch_size()
-        self.decoder = self._build_decoder(hidden_dim, patch_size, num_classes)
+        # # 3. build segmentation decoder
+        # if model_type == 'sam3':
+        #     self.encoder = self.model.backbone.forward_image    # Entrypoint for the SAM3 encoder
+        #     hidden_dim = self.model.hidden_dim
+        # else:
+        #     hidden_dim = self.encoder.feature_info.channels()[-1]
+    
 
         if verbose:
             print(f"Model initialized with {backbone} as encoder and {num_classes} classes")
@@ -223,8 +246,8 @@ class SegmentationModel(torch.nn.Module):
         H, W = self.image_size, self.image_size
         dummy = torch.randn(1, 3, H, W)
         outputs = self.encoder(dummy)
-        if self.model_type == 'sam3':
-            outputs = outputs["backbone_fpn"][-1]
+        # if self.model_type == 'sam3':
+        #     outputs = outputs["backbone_fpn"][-1]
         H_hat, W_hat = outputs[0].shape[-2], outputs[0].shape[-1]
         output_stride = H // H_hat
         assert output_stride == W // W_hat, "Output stride mismatch" # make more descriptive
@@ -258,16 +281,17 @@ class SegmentationModel(torch.nn.Module):
         
     def forward(self, x):
 
-        # If using SAM3, the encoder output isn't a set of feature maps like the timms models toss out
-        # We'll need to extract an actual feature map to sent to the decoder
-        if self.model_type == 'sam3':
-            x = self.encoder(x)
-            x = x["backbone_fpn"][-1]  # [B, C, H, W] -> [B, hidden_dim, H/patch_size, W/patch_size]
-            x = self.decoder(x)
-            x = F.interpolate(x, size=(self.image_size, self.image_size), mode='bilinear', align_corners=False)
-        else:
-            x = self.encoder(x)[-1]    # [B, C, H, W] -> [B, hidden_dim, H/patch_size, W/patch_size]
-            x = self.decoder(x) # [B, hidden_dim, H/patch_size, W/patch_size] -> [B, num_classes, H, W]
+        # # If using SAM3, the encoder output isn't a set of feature maps like the timms models toss out
+        # # We'll need to extract an actual feature map to sent to the decoder
+        # if self.model_type == 'sam3':
+        #     x = self.encoder(x)
+        #     x = x["backbone_fpn"][-1]  # [B, C, H, W] -> [B, hidden_dim, H/patch_size, W/patch_size]
+        #     x = self.decoder(x)
+        #     x = F.interpolate(x, size=(self.image_size, self.image_size), mode='bilinear', align_corners=False)
+        # else:
+
+        x = self.encoder(x)[-1]    # [B, C, H, W] -> [B, hidden_dim, H/patch_size, W/patch_size]
+        x = self.decoder(x) # [B, hidden_dim, H/patch_size, W/patch_size] -> [B, num_classes, H, W]
         return x
 
 
