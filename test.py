@@ -100,6 +100,17 @@ def _generate_tile_coords(
             uniq_coords.append(rc)
     return uniq_coords
 
+def _generate_classical_tile_coords(
+    height: int,
+    width: int,
+    window_size: int,
+) -> List[Tuple[int, int]]:
+    coords: List[Tuple[int, int]] = []
+    for r in range(0, height, window_size):
+        for c in range(0, width, window_size):
+            coords.append((r, c))
+    return coords
+
 def _generate_hann_weights(window_size: int) -> np.ndarray:
     w1d = torch.hann_window(window_size, periodic=False, dtype=torch.float32)
     weight2d = torch.outer(w1d, w1d).clamp_min(1e-6)
@@ -111,17 +122,34 @@ def segment(
     tile_size: int,
     batch_size: int = 64,
     n_classes: int = 2,
+    inference_mode: str = 'hann',
 ) -> Tuple[np.ndarray, np.ndarray]:
     
     H, W, _ = image.shape
     C = n_classes
-    ws = min(tile_size, H, W)
     normalized = _normalize_image(image, config.IMAGENET_MEAN, config.IMAGENET_STD)
-    coords = _generate_tile_coords(H, W, ws)
-    weight2d_np = _generate_hann_weights(ws)
 
-    prob_acc = np.zeros((C, H, W), dtype=np.float32)
-    weight_acc = np.zeros((H, W), dtype=np.float32)
+    if inference_mode == 'hann':
+        ws = min(tile_size, H, W)
+        tile_image = normalized
+        coords = _generate_tile_coords(H, W, ws)
+        weight2d_np = _generate_hann_weights(ws)
+    elif inference_mode == 'classical':
+        ws = tile_size
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        tile_image = np.pad(
+            normalized,
+            ((0, pad_h), (0, pad_w), (0, 0)),
+            mode='constant')
+        coords = _generate_classical_tile_coords(tile_image.shape[0], tile_image.shape[1], ws)
+        weight2d_np = np.ones((ws, ws), dtype=np.float32)
+    else:
+        raise ValueError(f"Unknown inference mode: {inference_mode}")
+
+    tile_H, tile_W, _ = tile_image.shape
+    prob_acc = np.zeros((C, tile_H, tile_W), dtype=np.float32)
+    weight_acc = np.zeros((tile_H, tile_W), dtype=np.float32)
 
     device = next(model.parameters()).device
     model.eval()
@@ -137,7 +165,7 @@ def segment(
 
             batch_np = np.empty((b, 3, ws, ws), dtype=np.float32)
             for i, (r, c) in enumerate(batch_coords):
-                tile = normalized[r : r + ws, c : c + ws, :]
+                tile = tile_image[r : r + ws, c : c + ws, :]
                 batch_np[i] = tile.transpose(2, 0, 1)
 
             batch = torch.from_numpy(batch_np)
@@ -163,6 +191,7 @@ def segment(
 
     weight_acc = np.clip(weight_acc, 1e-6, None)
     final_probs = prob_acc / weight_acc[None, :, :]
+    final_probs = final_probs[:, :H, :W]
     final_mask = final_probs.argmax(axis=0).astype(np.uint8)
     return final_mask, final_probs
 
@@ -174,6 +203,18 @@ def compute_image_dice(preds: np.ndarray, targets: np.ndarray) -> float:
     union = preds.sum(axis=(0, 1)) + targets.sum(axis=(0, 1))
     dice = (2 * intersection + 1e-6) / (union + 1e-6)
     return dice.mean().item()
+
+def get_metrics_path(
+    backbone: str,
+    tile_size: int,
+    split: str,
+    inference_mode: str,
+) -> str:
+    metrics_path = config.METRICS_PATH.format(backbone, tile_size, split)
+    if inference_mode == 'hann':
+        return metrics_path
+    root, ext = os.path.splitext(metrics_path)
+    return f"{root}_inference-{inference_mode}{ext}"
 
 # =============================================================================
 # Main
@@ -193,6 +234,9 @@ def parse_args():
     parser.add_argument('--device', type=int, default=0, 
                         choices=list(range(8)),
                         help='CUDA device index (0, 1, ..., 7)')
+    parser.add_argument('--inference_mode', type=str, default='hann',
+                        choices=['hann', 'classical'],
+                        help='Tile inference mode')
     return parser.parse_args()
     
 def main():
@@ -201,6 +245,7 @@ def main():
     # set global variables based on args
     tile_size = args.tile_size
     backbone = args.backbone
+    inference_mode = args.inference_mode
     model_type = ['vit', 'unet']['resnet' in backbone] 
     device = torch.device(f'cuda:{args.device}')
 
@@ -269,7 +314,7 @@ def main():
         # initialize
         print(f"Evaluating on {split} set...")
         dices = []
-        metrics_path = config.METRICS_PATH.format(backbone, tile_size, split)
+        metrics_path = get_metrics_path(backbone, tile_size, split, inference_mode)
         columns = gen_columns if split == 'generalization' else tvt_columns
         with open(metrics_path, 'w') as f:
             f.write(','.join(columns) + '\n')
@@ -286,7 +331,8 @@ def main():
                 image, model, 
                 tile_size=tile_size,
                 batch_size=config.EVAL_BATCH_SIZE, 
-                n_classes=2)
+                n_classes=2,
+                inference_mode=inference_mode)
             if device.type == 'cuda':
                 torch.cuda.synchronize(device)
             inference_time = time.perf_counter() - start_time
