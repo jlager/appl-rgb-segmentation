@@ -13,6 +13,7 @@ resnets = ['resnet34', 'resnet50', 'resnet101', 'resnet152']
 vits = ['vit_small_patch16_224', 'vit_small_patch8_224', 
         'vit_base_patch16_224', 'vit_base_patch8_224']
 tile_sizes = [224, 448]
+pretrained = True
 
 # initialize plot
 plt.figure(figsize=(8, 8))
@@ -21,7 +22,8 @@ for i, backbone in enumerate(vits):# + vits):
     for j, tile_size in enumerate(tile_sizes):
 
         # read log file
-        log_file = os.path.join('..', config.LOG_PATH.format(backbone, tile_size))
+        run_name = f"{backbone}_{'pretrained' if pretrained else 'scratch'}"
+        log_file = os.path.join('..', config.LOG_PATH.format(run_name, tile_size))
         df = pd.read_csv(log_file)
         columns = df.columns
 

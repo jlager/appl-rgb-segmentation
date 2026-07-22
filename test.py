@@ -205,12 +205,12 @@ def compute_image_dice(preds: np.ndarray, targets: np.ndarray) -> float:
     return dice.mean().item()
 
 def get_metrics_path(
-    backbone: str,
+    run_name: str,
     tile_size: int,
     split: str,
     inference_mode: str,
 ) -> str:
-    metrics_path = config.METRICS_PATH.format(backbone, tile_size, split)
+    metrics_path = config.METRICS_PATH.format(run_name, tile_size, split)
     if inference_mode == 'hann':
         return metrics_path
     root, ext = os.path.splitext(metrics_path)
@@ -228,6 +228,8 @@ def parse_args():
                                 'vit_base_patch8_224', 'vit_base_patch16_224',
                                 'resnet34', 'resnet50', 'resnet101', 'resnet152'],
                        help='Model backbone')
+    parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction,
+                        default=True, help='Use pretrained backbone weights')
     parser.add_argument('--tile_size', type=int, default=448, 
                         choices=[224, 448],
                         help='Tile size for training')
@@ -245,6 +247,7 @@ def main():
     # set global variables based on args
     tile_size = args.tile_size
     backbone = args.backbone
+    run_name = f"{backbone}_{'pretrained' if args.pretrained else 'scratch'}"
     inference_mode = args.inference_mode
     model_type = ['vit', 'unet']['resnet' in backbone] 
     device = torch.device(f'cuda:{args.device}')
@@ -278,10 +281,11 @@ def main():
         backbone=backbone,
         tile_size=tile_size,
         device=device,
+        pretrained=args.pretrained,
     )
     
     # load checkpoint
-    checkpoint_path = config.CHECKPOINT_PATH.format(backbone, tile_size)
+    checkpoint_path = config.CHECKPOINT_PATH.format(run_name, tile_size)
     print(f"Loading checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -314,7 +318,7 @@ def main():
         # initialize
         print(f"Evaluating on {split} set...")
         dices = []
-        metrics_path = get_metrics_path(backbone, tile_size, split, inference_mode)
+        metrics_path = get_metrics_path(run_name, tile_size, split, inference_mode)
         columns = gen_columns if split == 'generalization' else tvt_columns
         with open(metrics_path, 'w') as f:
             f.write(','.join(columns) + '\n')

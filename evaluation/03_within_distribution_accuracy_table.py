@@ -41,11 +41,16 @@ def format_stats(mean, std, is_best):
         return f'$\\mathbf{{{stats}}}$'
     return f'${stats}$'
 
+def get_run_name(model_name):
+    suffix = 'pretrained' if model_name.startswith('vit') else 'scratch'
+    return f'{model_name}_{suffix}'
+
 # compute accuracy metrics
 rows = []
 for backbone, patch_size, model_name in models:
     for tile_size in tile_sizes:
-        metrics_file = os.path.join('..', config.METRICS_PATH.format(model_name, tile_size, 'test'))
+        run_name = get_run_name(model_name)
+        metrics_file = os.path.join('..', config.METRICS_PATH.format(run_name, tile_size, 'test'))
         df = pd.read_csv(metrics_file)
         stats = [compute_stats(df, species, modality) for _, species, modality in groups]
         rows.append((backbone, patch_size, tile_size, stats))

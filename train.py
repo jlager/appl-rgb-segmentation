@@ -272,6 +272,8 @@ def parse_args():
                                 'vit_base_patch8_224', 'vit_base_patch16_224',
                                 'resnet34', 'resnet50', 'resnet101', 'resnet152'],
                        help='Model backbone')
+    parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction,
+                        default=True, help='Use pretrained backbone weights')
     parser.add_argument('--tile_size', type=int, default=448, 
                         choices=[224, 448],
                         help='Tile size for training')
@@ -286,12 +288,13 @@ def main():
     # set global variables based on args
     tile_size = args.tile_size
     backbone = args.backbone
+    run_name = f"{backbone}_{'pretrained' if args.pretrained else 'scratch'}"
     model_type = ['vit', 'unet']['resnet' in backbone] 
     device = torch.device(f'cuda:{args.device}')
 
     # create output directories
-    log_path = config.LOG_PATH.format(backbone, tile_size)
-    checkpoint_path = config.CHECKPOINT_PATH.format(backbone, tile_size)
+    log_path = config.LOG_PATH.format(run_name, tile_size)
+    checkpoint_path = config.CHECKPOINT_PATH.format(run_name, tile_size)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
@@ -339,6 +342,7 @@ def main():
         backbone=backbone,
         tile_size=tile_size,
         device=device,
+        pretrained=args.pretrained,
     )
     if model_type == 'vit':
         encoder_params = model.encoder.parameters()

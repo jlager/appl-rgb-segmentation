@@ -28,16 +28,16 @@ groups = [
     ('RGB2', ['rgb2', 'rgb2-rhizo']),
 ]
 
-def get_metrics_path(model_name, tile_size, inference_mode):
+def get_metrics_path(run_name, tile_size, inference_mode):
     metrics_file = os.path.join(
-        '..', config.METRICS_PATH.format(model_name, tile_size, 'generalization'))
+        '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
     if inference_mode == 'hann':
         return metrics_file
     root, ext = os.path.splitext(metrics_file)
     return f'{root}_inference-{inference_mode}{ext}'
 
-def load_metrics(model_name, tile_size, inference_mode):
-    metrics_file = get_metrics_path(model_name, tile_size, inference_mode)
+def load_metrics(run_name, tile_size, inference_mode):
+    metrics_file = get_metrics_path(run_name, tile_size, inference_mode)
     if not os.path.isfile(metrics_file):
         raise FileNotFoundError(metrics_file)
 
@@ -74,12 +74,17 @@ def format_stats(mean, std, is_best):
         return f'$\\mathbf{{{stats}}}$'
     return f'${stats}$'
 
+def get_run_name(model_name):
+    suffix = 'pretrained' if model_name.startswith('vit') else 'scratch'
+    return f'{model_name}_{suffix}'
+
 # compute timing metrics
 rows = []
 for backbone, patch_size, model_name in models:
     for tile_size in tile_sizes:
+        run_name = get_run_name(model_name)
         mode_dfs = {
-            mode_name: load_metrics(model_name, tile_size, mode_name)
+            mode_name: load_metrics(run_name, tile_size, mode_name)
             for _, mode_name in inference_modes
         }
         stats = []

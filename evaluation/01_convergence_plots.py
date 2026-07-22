@@ -11,7 +11,9 @@ import config
 # options
 backbone = 'vit_base_patch8_224' # 'resnet34' or 'vit_small_patch8_224'
 tile_size = 448
-log_file = os.path.join('..', config.LOG_PATH.format(backbone, tile_size))
+pretrained = True
+run_name = f"{backbone}_{'pretrained' if pretrained else 'scratch'}"
+log_file = os.path.join('..', config.LOG_PATH.format(run_name, tile_size))
 
 # read log file
 df = pd.read_csv(log_file)

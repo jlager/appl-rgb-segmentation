@@ -25,16 +25,16 @@ groups = [
 ]
 key_columns = ['Species', 'Modality', 'File Name']
 
-def get_metrics_path(model_name, tile_size, inference_mode):
+def get_metrics_path(run_name, tile_size, inference_mode):
     metrics_file = os.path.join(
-        '..', config.METRICS_PATH.format(model_name, tile_size, 'generalization'))
+        '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
     if inference_mode == 'hann':
         return metrics_file
     root, ext = os.path.splitext(metrics_file)
     return f'{root}_inference-{inference_mode}{ext}'
 
-def load_metrics(model_name, tile_size, inference_mode):
-    metrics_file = get_metrics_path(model_name, tile_size, inference_mode)
+def load_metrics(run_name, tile_size, inference_mode):
+    metrics_file = get_metrics_path(run_name, tile_size, inference_mode)
     if not os.path.isfile(metrics_file):
         raise FileNotFoundError(metrics_file)
 
@@ -53,9 +53,9 @@ def load_metrics(model_name, tile_size, inference_mode):
     df['Modality'] = df['Modality'].str.lower()
     return df
 
-def load_gain_metrics(model_name, tile_size):
-    hann_df = load_metrics(model_name, tile_size, 'hann')
-    classical_df = load_metrics(model_name, tile_size, 'classical')
+def load_gain_metrics(run_name, tile_size):
+    hann_df = load_metrics(run_name, tile_size, 'hann')
+    classical_df = load_metrics(run_name, tile_size, 'classical')
     merged = hann_df.merge(
         classical_df,
         on=key_columns,
@@ -67,7 +67,7 @@ def load_gain_metrics(model_name, tile_size):
     n_missing_classical = (merged['_merge'] == 'left_only').sum()
     n_missing_hann = (merged['_merge'] == 'right_only').sum()
     if n_missing_classical or n_missing_hann:
-        context = f'{model_name}, tile {tile_size}'
+        context = f'{run_name}, tile {tile_size}'
         raise ValueError(
             f'Mismatched Hann/classical rows for {context}: '
             f'{n_missing_classical} missing classical rows, '
@@ -97,11 +97,16 @@ def format_stats(mean, std, is_best):
         return f'$\\mathbf{{{stats}}}$'
     return f'${stats}$'
 
+def get_run_name(model_name):
+    suffix = 'pretrained' if model_name.startswith('vit') else 'scratch'
+    return f'{model_name}_{suffix}'
+
 # compute Dice gain metrics
 rows = []
 for backbone, patch_size, model_name in models:
     for tile_size in tile_sizes:
-        df = load_gain_metrics(model_name, tile_size)
+        run_name = get_run_name(model_name)
+        df = load_gain_metrics(run_name, tile_size)
         stats = []
         for group_label, modalities in groups:
             context = f'{model_name}, tile {tile_size}'

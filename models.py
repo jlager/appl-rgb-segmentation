@@ -13,12 +13,13 @@ class UNet(torch.nn.Module):
         self, 
         backbone="resnet34",
         num_classes=2,
+        pretrained=True,
     ) -> None:
         
         super().__init__()
         self.model = smp.Unet(
             encoder_name=backbone,
-            encoder_weights=None,
+            encoder_weights='imagenet' if pretrained else None,
             in_channels=3,
             classes=num_classes,
             activation=None,
@@ -152,6 +153,7 @@ def build_model(
     backbone: str,
     tile_size: int,
     device: torch.device,
+    pretrained: bool = True,
 ) -> torch.nn.Module:
 
     if model_type == 'vit':
@@ -160,7 +162,7 @@ def build_model(
             patch_size=8 if 'patch8' in backbone else 16,
             window_size=224,
             image_size=tile_size,
-            pretrained=True,
+            pretrained=pretrained,
             num_classes=2,
         ).to(device)
     
@@ -168,4 +170,5 @@ def build_model(
         return UNet(
             backbone=backbone,
             num_classes=2,
+            pretrained=pretrained,
         ).to(device)

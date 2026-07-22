@@ -76,14 +76,19 @@ def format_header(species, modality):
     modality_label = r'\\'.join(modality_parts)
     return rf'\shortstack{{{species_label}\\{modality_label}}}'
 
+def get_run_name(model_name):
+    suffix = 'pretrained' if model_name.startswith('vit') else 'scratch'
+    return f'{model_name}_{suffix}'
+
 groups = load_groups()
 
 # compute accuracy metrics
 rows = []
 for backbone, patch_size, model_name in models:
     for tile_size in tile_sizes:
+        run_name = get_run_name(model_name)
         metrics_file = os.path.join(
-            '..', config.METRICS_PATH.format(model_name, tile_size, 'generalization'))
+            '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
         df = pd.read_csv(metrics_file)
         stats = [compute_overall_stats(df)]
         stats += [compute_stats(df, species, modality) for species, modality in groups]
