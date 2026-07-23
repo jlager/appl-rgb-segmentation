@@ -60,6 +60,21 @@ def load_images_and_masks(
         masks.append(np.memmap(m, dtype=config.MASK_DTYPE, mode='r', shape=(h, w)))
     return images, masks
 
+def load_image(image_path: str) -> np.memmap:
+    h = config.RGB1_HEIGHT if 'rgb1' in image_path.lower() else config.RGB2_HEIGHT
+    w = config.RGB1_WIDTH if 'rgb1' in image_path.lower() else config.RGB2_WIDTH
+    c = config.RGB1_CHANNELS if 'rgb1' in image_path.lower() else config.RGB2_CHANNELS
+    return np.memmap(image_path, dtype=config.IMAGE_DTYPE, mode='r', shape=(h, w, c))
+
+def load_masks(mask_paths: List[str]) -> List[np.memmap]:
+    """Loads masks from memmap files."""
+    masks = []
+    for m in mask_paths:
+        h = config.RGB1_HEIGHT if 'rgb1' in m.lower() else config.RGB2_HEIGHT
+        w = config.RGB1_WIDTH if 'rgb1' in m.lower() else config.RGB2_WIDTH
+        masks.append(np.memmap(m, dtype=config.MASK_DTYPE, mode='r', shape=(h, w)))
+    return masks
+
 # =============================================================================
 # Segmentation
 # =============================================================================
@@ -216,6 +231,32 @@ def get_metrics_path(
     root, ext = os.path.splitext(metrics_path)
     return f"{root}_inference-{inference_mode}{ext}"
 
+def get_pred_mask_path(
+    run_name: str,
+    tile_size: int,
+    split: str,
+    inference_mode: str,
+    row: pd.Series,
+) -> str:
+    mask_dir = config.PRED_MASK_DIR.format(run_name, tile_size, inference_mode)
+    subdir = '-'.join([str(row['Modality']), str(row['Species'])])
+    return os.path.join(mask_dir, split, subdir, str(row['File Name']))
+
+def save_pred_mask(preds: np.ndarray, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not cv2.imwrite(path, 255 * preds.astype(np.uint8)):
+        raise IOError(f"Could not write predicted mask: {path}")
+
+def load_pred_mask(path: str, shape: Tuple[int, int]) -> np.ndarray:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    preds = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if preds is None:
+        raise ValueError(f"Could not read predicted mask: {path}")
+    if preds.shape != shape:
+        raise ValueError(f"Predicted mask shape {preds.shape} does not match target shape {shape}: {path}")
+    return (preds > 127).astype(np.uint8)
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -239,6 +280,8 @@ def parse_args():
     parser.add_argument('--inference_mode', type=str, default='hann',
                         choices=['hann', 'classical'],
                         help='Tile inference mode')
+    parser.add_argument('--overwrite_masks', action='store_true',
+                        help='Regenerate predicted PNG masks even when cached masks already exist')
     return parser.parse_args()
     
 def main():
@@ -251,6 +294,7 @@ def main():
     inference_mode = args.inference_mode
     model_type = ['vit', 'unet']['resnet' in backbone] 
     device = torch.device(f'cuda:{args.device}')
+    overwrite_masks = args.overwrite_masks
 
     # get image and mask paths for each split
     train_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'train.csv'))
@@ -262,35 +306,39 @@ def main():
     test_image_paths, test_mask_paths, _ = get_paths(test_df)
     gen_image_paths, gen_mask_paths, _ = get_paths(gen_df)
 
-    # load image/mask memmaps
-    print("Loading images and masks...")
-    train_images, train_masks = load_images_and_masks(train_image_paths, train_mask_paths)
-    val_images, val_masks = load_images_and_masks(val_image_paths, val_mask_paths)
-    test_images, test_masks = load_images_and_masks(test_image_paths, test_mask_paths)
-    gen_images, gen_masks = load_images_and_masks(gen_image_paths, gen_mask_paths)
+    # load mask memmaps
+    print("Loading masks...")
+    train_masks = load_masks(train_mask_paths)
+    val_masks = load_masks(val_mask_paths)
+    test_masks = load_masks(test_mask_paths)
+    gen_masks = load_masks(gen_mask_paths)
 
     # print dataset sizes
-    print(f"Train dataset size: {len(train_images)} images")
-    print(f"Val dataset size: {len(val_images)} images")
-    print(f"Test dataset size: {len(test_images)} images")
-    print(f"Generalization dataset size: {len(gen_images)} images")
+    print(f"Train dataset size: {len(train_masks)} images")
+    print(f"Val dataset size: {len(val_masks)} images")
+    print(f"Test dataset size: {len(test_masks)} images")
+    print(f"Generalization dataset size: {len(gen_masks)} images")
 
-    # instantiate model
-    model = models.build_model(
-        model_type=model_type,
-        backbone=backbone,
-        tile_size=tile_size,
-        device=device,
-        pretrained=args.pretrained,
-    )
-    
-    # load checkpoint
-    checkpoint_path = config.CHECKPOINT_PATH.format(run_name, tile_size)
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    model = torch.compile(model)
+    model = None
+
+    def get_model() -> torch.nn.Module:
+        nonlocal model
+        if model is None:
+            model = models.build_model(
+                model_type=model_type,
+                backbone=backbone,
+                tile_size=tile_size,
+                device=device,
+                pretrained=args.pretrained,
+            )
+            
+            checkpoint_path = config.CHECKPOINT_PATH.format(run_name, tile_size)
+            print(f"Loading checkpoint from {checkpoint_path}...")
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
+            model = torch.compile(model)
+        return model
 
     # add columns to metrics file
     train_df['Dice'] = np.nan
@@ -308,38 +356,50 @@ def main():
     os.makedirs(os.path.dirname(config.METRICS_PATH), exist_ok=True)
 
     # evaluate on train, val, test sets
-    train_split = ('train', train_images, train_masks, train_df)
-    val_split = ('val', val_images, val_masks, val_df)
-    test_split = ('test', test_images, test_masks, test_df)
-    gen_split = ('generalization', gen_images, gen_masks, gen_df)
-    for split, images, masks, df in [train_split, val_split, test_split, gen_split]:
+    train_split = ('train', train_image_paths, train_masks, train_df)
+    val_split = ('val', val_image_paths, val_masks, val_df)
+    test_split = ('test', test_image_paths, test_masks, test_df)
+    gen_split = ('generalization', gen_image_paths, gen_masks, gen_df)
+    for split, image_paths, masks, df in [train_split, val_split, test_split, gen_split]:
 
 
         # initialize
         print(f"Evaluating on {split} set...")
         dices = []
         metrics_path = get_metrics_path(run_name, tile_size, split, inference_mode)
+        old_times = None
+        if os.path.isfile(metrics_path):
+            old_df = pd.read_csv(metrics_path)
+            if 'Time (s)' in old_df.columns and len(old_df) == len(df):
+                old_times = old_df['Time (s)'].tolist()
         columns = gen_columns if split == 'generalization' else tvt_columns
         with open(metrics_path, 'w') as f:
             f.write(','.join(columns) + '\n')
 
         # evaluate each image
-        for i in tqdm(range(len(images))):
-            image = np.array(images[i])
+        for i in tqdm(range(len(masks))):
             mask = np.array(masks[i])
 
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
-            start_time = time.perf_counter()
-            preds, _ = segment(
-                image, model, 
-                tile_size=tile_size,
-                batch_size=config.EVAL_BATCH_SIZE, 
-                n_classes=2,
-                inference_mode=inference_mode)
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
-            inference_time = time.perf_counter() - start_time
+            pred_mask_path = get_pred_mask_path(
+                run_name, tile_size, split, inference_mode, df.iloc[i])
+            if os.path.isfile(pred_mask_path) and not overwrite_masks:
+                preds = load_pred_mask(pred_mask_path, mask.shape)
+                inference_time = old_times[i] if old_times is not None else np.nan
+            else:
+                image = np.array(load_image(image_paths[i]))
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                start_time = time.perf_counter()
+                preds, _ = segment(
+                    image, get_model(), 
+                    tile_size=tile_size,
+                    batch_size=config.EVAL_BATCH_SIZE, 
+                    n_classes=2,
+                    inference_mode=inference_mode)
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                inference_time = time.perf_counter() - start_time
+                save_pred_mask(preds, pred_mask_path)
 
             dice = compute_image_dice(preds, mask)
             dices.append(dice)

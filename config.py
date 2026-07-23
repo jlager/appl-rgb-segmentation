@@ -46,6 +46,8 @@ LOG_PATH = os.path.join(
 EVAL_BATCH_SIZE = 32
 METRICS_PATH = os.path.join(
     'outputs', 'metrics', 'metrics_model-{}_tile-{}_split-{}.csv')
+PRED_MASK_DIR = os.path.join(
+    'outputs', 'masks', 'model-{}_tile-{}_inference-{}')
 
 # random seeds
 SEED = 42

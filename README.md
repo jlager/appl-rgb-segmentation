@@ -120,6 +120,19 @@ outputs/metrics/metrics_model-<backbone>_<pretrained|scratch>_tile-<tile>_split-
 outputs/metrics/metrics_model-<backbone>_<pretrained|scratch>_tile-<tile>_split-<split>_inference-classical.csv
 ```
 
+It also writes predicted PNG masks under:
+
+```text
+outputs/masks/model-<backbone>_<pretrained|scratch>_tile-<tile>_inference-<mode>/<split>/<modality-species>/*.png
+```
+
+Evaluation reuses saved prediction masks when present, and runs inference only
+for missing masks. To force mask regeneration:
+
+```bash
+uv run python test.py --backbone vit_base_patch8_224 --tile_size 448 --device 0 --inference_mode hann --overwrite_masks
+```
+
 Splits are `train`, `val`, `test`, and `generalization`.
 
 ## Summaries
