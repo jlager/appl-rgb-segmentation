@@ -1,6 +1,7 @@
 data/
 scratch/
 outputs/checkpoints/
+outputs/masks/
 logs/*.log
 *.pyc
 __pycache__/

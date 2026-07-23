@@ -16,6 +16,7 @@ models = [
     ('ViT-Small', '8', 'vit_small_patch8_224'),
     ('ViT-Base', '16', 'vit_base_patch16_224'),
     ('ViT-Base', '8', 'vit_base_patch8_224'),
+    ('Threshold', '-', 'threshold'),
 ]
 tile_sizes = [224, 448]
 
@@ -77,22 +78,35 @@ def format_header(species, modality):
     return rf'\shortstack{{{species_label}\\{modality_label}}}'
 
 def get_run_name(model_name):
+    if model_name == 'threshold':
+        return 'threshold'
     suffix = 'pretrained' if model_name.startswith('vit') else 'scratch'
     return f'{model_name}_{suffix}'
+
+def get_tile_sizes(model_name):
+    return [448] if model_name == 'threshold' else tile_sizes
+
+def get_metrics_file(model_name, run_name, tile_size):
+    metrics_file = os.path.join(
+        '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
+    if model_name != 'threshold':
+        return metrics_file
+    root, ext = os.path.splitext(metrics_file)
+    return f'{root}_inference-none{ext}'
 
 groups = load_groups()
 
 # compute accuracy metrics
 rows = []
 for backbone, patch_size, model_name in models:
-    for tile_size in tile_sizes:
+    for tile_size in get_tile_sizes(model_name):
         run_name = get_run_name(model_name)
-        metrics_file = os.path.join(
-            '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
+        metrics_file = get_metrics_file(model_name, run_name, tile_size)
         df = pd.read_csv(metrics_file)
         stats = [compute_overall_stats(df)]
         stats += [compute_stats(df, species, modality) for species, modality in groups]
-        rows.append((backbone, patch_size, tile_size, stats))
+        tile_label = '-' if model_name == 'threshold' else tile_size
+        rows.append((backbone, patch_size, tile_label, stats))
 
 # bold all models tied for the best displayed mean
 rounded_means = np.array([[round(mean, 1) for mean, _ in stats] for _, _, _, stats in rows])

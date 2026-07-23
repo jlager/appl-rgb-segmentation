@@ -210,6 +210,13 @@ def segment(
     final_mask = final_probs.argmax(axis=0).astype(np.uint8)
     return final_mask, final_probs
 
+def segment_threshold(image: np.ndarray, threshold: float = 0.2) -> np.ndarray:
+    r = image[:, :, 0].astype(np.int16)
+    g = image[:, :, 1].astype(np.int16)
+    b = image[:, :, 2].astype(np.int16)
+    score = 4 * g - 3 * b - r
+    return (score > threshold * 255.0).astype(np.uint8)
+
 def compute_image_dice(preds: np.ndarray, targets: np.ndarray) -> float:
     # preds: [H, W]; targets: [H, W]
     preds = preds.astype(float)
@@ -267,7 +274,8 @@ def parse_args():
     parser.add_argument('--backbone', type=str, default='vit_base_patch8_224', 
                        choices=['vit_small_patch8_224', 'vit_small_patch16_224',
                                 'vit_base_patch8_224', 'vit_base_patch16_224',
-                                'resnet34', 'resnet50', 'resnet101', 'resnet152'],
+                                'resnet34', 'resnet50', 'resnet101', 'resnet152',
+                                'threshold'],
                        help='Model backbone')
     parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction,
                         default=True, help='Use pretrained backbone weights')
@@ -282,6 +290,8 @@ def parse_args():
                         help='Tile inference mode')
     parser.add_argument('--overwrite_masks', action='store_true',
                         help='Regenerate predicted PNG masks even when cached masks already exist')
+    parser.add_argument('--threshold', type=float, default=0.2,
+                        help='Threshold for normalized 4G - 3B - R segmentation')
     return parser.parse_args()
     
 def main():
@@ -290,9 +300,12 @@ def main():
     # set global variables based on args
     tile_size = args.tile_size
     backbone = args.backbone
-    run_name = f"{backbone}_{'pretrained' if args.pretrained else 'scratch'}"
-    inference_mode = args.inference_mode
-    model_type = ['vit', 'unet']['resnet' in backbone] 
+    use_threshold = backbone == 'threshold'
+    run_name = 'threshold' if use_threshold else f"{backbone}_{'pretrained' if args.pretrained else 'scratch'}"
+    if use_threshold:
+        tile_size = 448
+    inference_mode = 'none' if use_threshold else args.inference_mode
+    model_type = None if use_threshold else ['vit', 'unet']['resnet' in backbone]
     device = torch.device(f'cuda:{args.device}')
     overwrite_masks = args.overwrite_masks
 
@@ -387,16 +400,19 @@ def main():
                 inference_time = old_times[i] if old_times is not None else np.nan
             else:
                 image = np.array(load_image(image_paths[i]))
-                if device.type == 'cuda':
+                if not use_threshold and device.type == 'cuda':
                     torch.cuda.synchronize(device)
                 start_time = time.perf_counter()
-                preds, _ = segment(
-                    image, get_model(), 
-                    tile_size=tile_size,
-                    batch_size=config.EVAL_BATCH_SIZE, 
-                    n_classes=2,
-                    inference_mode=inference_mode)
-                if device.type == 'cuda':
+                if use_threshold:
+                    preds = segment_threshold(image, threshold=args.threshold)
+                else:
+                    preds, _ = segment(
+                        image, get_model(),
+                        tile_size=tile_size,
+                        batch_size=config.EVAL_BATCH_SIZE,
+                        n_classes=2,
+                        inference_mode=inference_mode)
+                if not use_threshold and device.type == 'cuda':
                     torch.cuda.synchronize(device)
                 inference_time = time.perf_counter() - start_time
                 save_pred_mask(preds, pred_mask_path)
