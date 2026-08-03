@@ -8,15 +8,15 @@ import config
 
 # options
 models = [
-    ('ResNet-34', '-', 'resnet34'),
-    ('ResNet-50', '-', 'resnet50'),
-    ('ResNet-101', '-', 'resnet101'),
-    ('ResNet-152', '-', 'resnet152'),
-    ('ViT-Small', '16', 'vit_small_patch16_224'),
-    ('ViT-Small', '8', 'vit_small_patch8_224'),
-    ('ViT-Base', '16', 'vit_base_patch16_224'),
-    ('ViT-Base', '8', 'vit_base_patch8_224'),
-    ('Threshold', '-', 'threshold'),
+    ('Fixed threshold', '-', '-', 'threshold'),
+    ('Supervised U-Net', 'ResNet-34', '-', 'resnet34'),
+    ('Supervised U-Net', 'ResNet-50', '-', 'resnet50'),
+    ('Supervised U-Net', 'ResNet-101', '-', 'resnet101'),
+    ('Supervised U-Net', 'ResNet-152', '-', 'resnet152'),
+    ('Pretrained ViT', 'ViT-Small', '16', 'vit_small_patch16_224'),
+    ('Pretrained ViT', 'ViT-Small', '8', 'vit_small_patch8_224'),
+    ('Pretrained ViT', 'ViT-Base', '16', 'vit_base_patch16_224'),
+    ('Pretrained ViT', 'ViT-Base', '8', 'vit_base_patch8_224'),
 ]
 tile_sizes = [224, 448]
 groups = [
@@ -62,36 +62,37 @@ def get_metrics_file(model_name, run_name, tile_size):
 
 # compute accuracy metrics
 rows = []
-for backbone, patch_size, model_name in models:
+for strategy, backbone, patch_size, model_name in models:
     for tile_size in get_tile_sizes(model_name):
         run_name = get_run_name(model_name)
         metrics_file = get_metrics_file(model_name, run_name, tile_size)
         df = pd.read_csv(metrics_file)
         stats = [compute_stats(df, species) for _, species in groups]
         tile_label = '-' if model_name == 'threshold' else tile_size
-        rows.append((backbone, patch_size, tile_label, stats))
+        rows.append((strategy, backbone, patch_size, tile_label, stats))
 
 # bold all models tied for the best displayed mean
-rounded_means = np.array([[round(mean, 1) for mean, _ in stats] for _, _, _, stats in rows])
+rounded_means = np.array([[round(mean, 1) for mean, _ in stats]
+                          for _, _, _, _, stats in rows])
 best_means = rounded_means.max(axis=0)
 
 # build LaTeX table
 lines = [
     r'\begin{table}[ht]',
     r'    \centering',
-    r'    \caption{\textbf{Generalization accuracy.} Image-level Dice scores (mean $\pm$ standard deviation, percentage points) are reported for each U-Net and Vision Transformer (ViT) configuration evaluated on the sorghum, soybean, eucalyptus, arabidopsis, and pennycress generalization split. Results are shown overall and separately for each species. Higher Dice values indicate greater overlap between predicted and manually annotated segmentation masks. Best-performing models for each column are shown in bold.}',
+    r'    \caption{\textbf{Generalization accuracy.} Image-level Dice scores (mean $\pm$ standard deviation, percentage points) are reported for the threshold-based method and each U-Net and Vision Transformer (ViT) configuration evaluated on the sorghum, soybean, eucalyptus, arabidopsis, and pennycress generalization split. Results are shown overall and separately for each species. Higher Dice values indicate greater overlap between predicted and manually annotated segmentation masks. Best-performing models for each column are shown in bold.}',
     r'    \rowcolors{2}{gray!25}{white}',
     r'    \renewcommand{\arraystretch}{1.5}',
-    r'    \begin{tabular}{lcccccccc}',
-    r'        Backbone & Patch & Tile & Overall & Sorghum & Soybean & Eucalyptus & Arabidopsis & Pennycress \\',
+    r'    \begin{tabular}{llcccccccc}',
+    r'        Strategy & Backbone & Patch & Tile & Overall & Sorghum & Soybean & Eucalyptus & Arabidopsis & Pennycress \\',
     r'        \hline',
 ]
-for backbone, patch_size, tile_size, stats in rows:
+for strategy, backbone, patch_size, tile_size, stats in rows:
     values = []
     for i, (mean, std) in enumerate(stats):
         is_best = np.isclose(round(mean, 1), best_means[i])
         values.append(format_stats(mean, std, is_best))
-    row = ' & '.join([backbone, patch_size, str(tile_size)] + values)
+    row = ' & '.join([strategy, backbone, patch_size, str(tile_size)] + values)
     lines.append(f'        {row} \\\\')
 lines += [
     r'    \end{tabular}',
