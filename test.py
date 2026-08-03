@@ -210,12 +210,38 @@ def segment(
     final_mask = final_probs.argmax(axis=0).astype(np.uint8)
     return final_mask, final_probs
 
+def _remove_small_objects(mask: np.ndarray, min_area: int = 150) -> np.ndarray:
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    areas = stats[:, cv2.CC_STAT_AREA]
+    keep = np.flatnonzero((np.arange(n_labels) != 0) & (areas >= min_area))
+    return np.isin(labels, keep).astype(np.uint8)
+
+def _fill_small_holes(mask: np.ndarray, max_area: int = 50) -> np.ndarray:
+    background = (mask == 0).astype(np.uint8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(background, connectivity=8)
+    areas = stats[:, cv2.CC_STAT_AREA]
+    border = np.unique(np.concatenate([
+        labels[0, :],
+        labels[-1, :],
+        labels[:, 0],
+        labels[:, -1],
+    ]))
+    fill = np.flatnonzero((np.arange(n_labels) != 0) & (areas <= max_area))
+    fill = np.setdiff1d(fill, border, assume_unique=False)
+    if fill.size:
+        mask = mask.copy()
+        mask[np.isin(labels, fill)] = 1
+    return mask.astype(np.uint8, copy=False)
+
 def segment_threshold(image: np.ndarray, threshold: float = 0.2) -> np.ndarray:
+    image = cv2.medianBlur(image, 5)
     r = image[:, :, 0].astype(np.int16)
     g = image[:, :, 1].astype(np.int16)
     b = image[:, :, 2].astype(np.int16)
     score = 4 * g - 3 * b - r
-    return (score > threshold * 255.0).astype(np.uint8)
+    mask = (score > threshold * 255.0).astype(np.uint8)
+    mask = _remove_small_objects(mask, min_area=150)
+    return _fill_small_holes(mask, max_area=50)
 
 def compute_image_dice(preds: np.ndarray, targets: np.ndarray) -> float:
     # preds: [H, W]; targets: [H, W]
