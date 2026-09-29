@@ -1,9 +1,13 @@
 data/
 scratch/
-outputs/checkpoints/
-outputs/masks/
+outputs/*
 logs/*.log
 *.pyc
 __pycache__/
 .ipynb_checkpoints/
 .venv/
+AGENTS.md
+data_export
+launch_model_grid_dgx.py
+launch_test_grid_dgx.py
+revisions/*

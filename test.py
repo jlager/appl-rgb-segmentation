@@ -305,6 +305,10 @@ def parse_args():
                        help='Model backbone')
     parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction,
                         default=True, help='Use pretrained backbone weights')
+    parser.add_argument(
+        '--checkpoint-dir',
+        default=os.path.dirname(config.CHECKPOINT_PATH),
+        help='Directory containing checkpoint_model-*.pt files')
     parser.add_argument('--tile_size', type=int, default=448, 
                         choices=[224, 448],
                         help='Tile size for training')
@@ -371,7 +375,13 @@ def main():
                 pretrained=args.pretrained,
             )
             
-            checkpoint_path = config.CHECKPOINT_PATH.format(run_name, tile_size)
+            checkpoint_filename = os.path.basename(
+                config.CHECKPOINT_PATH.format(run_name, tile_size))
+            checkpoint_path = os.path.join(
+                args.checkpoint_dir, checkpoint_filename)
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(
+                    f"Checkpoint does not exist: {checkpoint_path}")
             print(f"Loading checkpoint from {checkpoint_path}...")
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
