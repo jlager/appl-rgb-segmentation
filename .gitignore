@@ -11,3 +11,4 @@ data_export
 launch_model_grid_dgx.py
 launch_test_grid_dgx.py
 revisions/*
+copilot-instructions.md
