@@ -2,7 +2,8 @@ data/
 scratch/
 outputs/checkpoints/
 outputs/masks/
-logs/*.log
+outputs/logs/
+logs/
 *.pyc
 __pycache__/
 .ipynb_checkpoints/
