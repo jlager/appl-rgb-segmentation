@@ -67,4 +67,10 @@ plt.legend()
 plt.grid()
 
 plt.tight_layout()
-plt.show()
+
+figure_dir = os.path.join('..', 'outputs', 'figures')
+os.makedirs(figure_dir, exist_ok=True)
+figure_file = os.path.join(
+    figure_dir, f'convergence_model-{run_name}_tile-{tile_size}.png')
+plt.savefig(figure_file, dpi=300, bbox_inches='tight')
+print(f'Saved {figure_file}')
