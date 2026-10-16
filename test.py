@@ -316,6 +316,10 @@ def parse_args():
                         help='Tile inference mode')
     parser.add_argument('--overwrite_masks', action='store_true',
                         help='Regenerate predicted PNG masks even when cached masks already exist')
+    parser.add_argument('--splits', nargs='+',
+                        choices=['train', 'val', 'test', 'generalization'],
+                        default=['train', 'val', 'test', 'generalization'],
+                        help='Splits to evaluate, in the requested order')
     parser.add_argument('--threshold', type=float, default=0.2,
                         help='Threshold for normalized 4G - 3B - R segmentation')
     return parser.parse_args()
@@ -399,7 +403,9 @@ def main():
     val_split = ('val', val_image_paths, val_masks, val_df)
     test_split = ('test', test_image_paths, test_masks, test_df)
     gen_split = ('generalization', gen_image_paths, gen_masks, gen_df)
-    for split, image_paths, masks, df in [train_split, val_split, test_split, gen_split]:
+    splits = {item[0]: item for item in [train_split, val_split, test_split, gen_split]}
+    for split_name in args.splits:
+        split, image_paths, masks, df = splits[split_name]
 
 
         # initialize
