@@ -116,7 +116,7 @@ classical   non-overlapping padded tiles
 Evaluation writes one metrics CSV per split:
 
 ```text
-outputs/metrics/metrics_model-<backbone>_<pretrained|scratch>_tile-<tile>_split-<split>.csv
+outputs/metrics/metrics_model-<backbone>_<pretrained|scratch>_tile-<tile>_split-<split>_inference-hann.csv
 outputs/metrics/metrics_model-<backbone>_<pretrained|scratch>_tile-<tile>_split-<split>_inference-classical.csv
 ```
 
@@ -124,6 +124,21 @@ It also writes predicted PNG masks under:
 
 ```text
 outputs/masks/model-<backbone>_<pretrained|scratch>_tile-<tile>_inference-<mode>/<split>/<modality-species>/*.png
+```
+
+To evaluate the fixed-threshold baseline:
+
+```bash
+uv run python test.py --backbone threshold --threshold 0.2
+```
+
+This baseline uses normalized `4G - 3B - R`, requires no trained checkpoint,
+and always uses `tile-448` and `inference-none` in output names. It omits the
+`pretrained`/`scratch` suffix:
+
+```text
+outputs/metrics/metrics_model-threshold_tile-448_split-<split>_inference-none.csv
+outputs/masks/model-threshold_tile-448_inference-none/<split>/<modality-species>/*.png
 ```
 
 Evaluation reuses saved prediction masks when present, and runs inference only

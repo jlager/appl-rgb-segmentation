@@ -28,8 +28,6 @@ key_columns = ['Species', 'Modality', 'File Name']
 def get_metrics_path(run_name, tile_size, inference_mode):
     metrics_file = os.path.join(
         '..', config.METRICS_PATH.format(run_name, tile_size, 'generalization'))
-    if inference_mode == 'hann':
-        return metrics_file
     root, ext = os.path.splitext(metrics_file)
     return f'{root}_inference-{inference_mode}{ext}'
 

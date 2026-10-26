@@ -53,10 +53,9 @@ def get_tile_sizes(model_name):
 
 def get_metrics_file(model_name, run_name, tile_size):
     metrics_file = os.path.join('..', config.METRICS_PATH.format(run_name, tile_size, 'test'))
-    if model_name != 'threshold':
-        return metrics_file
+    inference_mode = 'none' if model_name == 'threshold' else 'hann'
     root, ext = os.path.splitext(metrics_file)
-    return f'{root}_inference-none{ext}'
+    return f'{root}_inference-{inference_mode}{ext}'
 
 # compute accuracy metrics
 rows = []

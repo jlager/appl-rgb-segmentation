@@ -259,8 +259,6 @@ def get_metrics_path(
     inference_mode: str,
 ) -> str:
     metrics_path = config.METRICS_PATH.format(run_name, tile_size, split)
-    if inference_mode == 'hann':
-        return metrics_path
     root, ext = os.path.splitext(metrics_path)
     return f"{root}_inference-{inference_mode}{ext}"
 
