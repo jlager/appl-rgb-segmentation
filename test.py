@@ -46,6 +46,19 @@ def get_paths(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
         roi_paths.append(os.path.join(config.ROI_DIR, subdir, roi_n))
     return image_paths, mask_paths, roi_paths
 
+def standardize_metrics_metadata(df: pd.DataFrame) -> None:
+    """Replace identifying metadata with values from the artifact key."""
+    for index, file_name in df['File Name'].items():
+        stem, ext = os.path.splitext(str(file_name))
+        parts = stem.split('__')
+        if ext != config.IMAGE_EXT or len(parts) != 5 or any(not part for part in parts):
+            raise ValueError(f"Invalid artifact key: {file_name}")
+
+        experiment_id, _, plant_id, round_id, _ = parts
+        df.at[index, 'Plant ID'] = plant_id
+        df.at[index, 'Date'] = round_id
+        df.at[index, 'Group'] = f"{experiment_id}__{plant_id}"
+
 def load_images_and_masks(
     image_paths: List[str], 
     mask_paths: List[str],
@@ -342,6 +355,8 @@ def main():
     val_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'val.csv'))
     test_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'test.csv'))
     gen_df = pd.read_csv(os.path.join(config.SPLIT_DIR, 'generalization.csv'))
+    for df in (train_df, val_df, test_df):
+        standardize_metrics_metadata(df)
     train_image_paths, train_mask_paths, _ = get_paths(train_df)
     val_image_paths, val_mask_paths, _ = get_paths(val_df)
     test_image_paths, test_mask_paths, _ = get_paths(test_df)
