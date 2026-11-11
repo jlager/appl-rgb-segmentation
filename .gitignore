@@ -1,4 +1,14 @@
-data/
+data/*
+!data/raw/
+data/raw/*
+!data/raw/metadata/
+data/raw/metadata/*
+!data/raw/metadata/metadata.csv
+!data/metadata/
+data/metadata/*
+!data/metadata/train.csv
+!data/metadata/val.csv
+!data/metadata/test.csv
 scratch/
 outputs/
 logs/
